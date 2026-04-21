@@ -6,7 +6,6 @@ import datetime
 import os
 import re
 import shlex
-import subprocess
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -15,6 +14,7 @@ from typing import Iterator
 
 from fabric import Connection
 
+from .asm_cmd_client import AsmCmdClient
 from .asm_config import AsmConfigFile
 from .host_config import HostConfig
 from .walk_result import WalkResult
@@ -50,6 +50,12 @@ class AsmCleanup:
         self._database_filter = frozenset(database_filter) if database_filter else None
         self._discovered_disk_groups: list[str] | None = None
         self._debug = bool(debug) or os.environ.get("ASM_CLEANUP_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
+        self._asm_cmd = AsmCmdClient(
+            host_config,
+            connection=connection,
+            debug_log=self.debug,
+            debug=self._debug,
+        )
         self.debug(
             "session init: "
             f"host_id={host_id!r}, "
@@ -514,21 +520,11 @@ class AsmCleanup:
         Returns:
             str: Full absolute path to the asmcmd executable (e.g., '/u01/app/grid/bin/asmcmd').
         """
-        # Remove trailing slashes from grid_home for consistent path formatting
-        gh = self.host_config.grid_home.rstrip("/")
-        # Construct and return the full path to the asmcmd binary
-        return f"{gh}/bin/asmcmd"
+        return self._asm_cmd.asmcmd_bin()
 
     def run_local_shell_command(self, cmd: str) -> list[ASMLine]:
         """Execute a shell command locally and return stdout lines."""
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        return result.stdout.splitlines()
+        return self._asm_cmd.run_local_shell_command(cmd)
 
     def run_remote_shell_command(self, cmd: str) -> list[ASMLine]:
         """Execute a shell command remotely via SSH and return stdout lines.
@@ -546,51 +542,7 @@ class AsmCleanup:
         Raises:
             RuntimeError: If SSH connection or host profile is not configured for this session.
         """
-        # Verify SSH connection and host profile are available
-        if self.connection is None or self.host_config is None:
-            raise RuntimeError("Remote command execution requires SSH connection and host profile.")
-
-        # Replace 'asmcmd' prefix with full binary path from grid_home
-        stripped = cmd.lstrip()
-        if stripped.startswith("asmcmd "):
-            # Extract command arguments after 'asmcmd ' prefix
-            rest = stripped[len("asmcmd "):]
-            # Build command with absolute path to asmcmd binary
-            adapted = f"{self.asmcmd_bin()} {rest}"
-        else:
-            # Use command as-is if not an asmcmd invocation
-            adapted = cmd
-
-        # Wrap command with Grid Infrastructure environment setup (oraenv sourcing)
-        script = self.host_config.wrap_remote_grid_command(adapted)
-        # Quote script for safe execution via bash -lc (login shell)
-        wrapped = f"bash -lc {shlex.quote(script)}"
-
-        # Log wrapper command metadata in debug mode
-        self.debug(
-            f"remote run: outer_cmd_chars={len(wrapped)}; script_lines={script.count(chr(10)) + 1}"
-        )
-
-        # Show script preview in debug mode (truncate if too long)
-        if self._debug:
-            preview = script if len(script) <= 1200 else script[:1200] + "\n... [truncated]"
-            self.debug(f"remote run script preview:\n{preview}")
-
-        # Execute wrapped command via Fabric SSH connection
-        result = self.connection.run(wrapped, hide=True, warn=True)
-
-        # Handle command failure (non-zero exit code)
-        if result.failed:
-            self.debug(f"remote run failed ok={result.ok!r} exited={getattr(result, 'exited', None)!r}")
-            if result.stderr:
-                self.debug(f"remote stderr:\n{result.stderr.strip()}")
-            # Return empty list on failure rather than raising exception
-            return []
-    
-        # Split stdout into lines and return
-        lines = (result.stdout or "").splitlines()
-        self.debug(f"remote run ok, stdout_lines={len(lines)}")
-        return lines
+        return self._asm_cmd.run_remote_shell_command(cmd)
 
     def run_shell_command(self, cmd: str) -> list[ASMLine]:
         """Execute command locally or remotely based on session mode.
@@ -616,18 +568,7 @@ class AsmCleanup:
             - Local mode: Both _connection and host_config are unset (None)
             Invalid states raise RuntimeError to prevent configuration errors.
         """
-        # SSH mode: Execute command remotely via Fabric connection
-        if self.connection is not None and self.host_config is not None:
-            return self.run_remote_shell_command(cmd)
-
-        # Local mode: Execute command via subprocess on current machine
-        if self.connection is None and self.host_config is None:
-            return self.run_local_shell_command(cmd)
-
-        # Invalid state: Only one of connection/host_config is set
-        raise RuntimeError(
-            "run_shell_command needs SSH (connection + host profile) or local mode (both unset)."
-        )
+        return self._asm_cmd.run_shell_command(cmd)
 
     def file_access_snapshot(self, conn: Connection) -> list[tuple[str, str]]:
         """Execute asmcmd lsof via SSH and return file access information.
