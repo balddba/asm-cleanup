@@ -22,3 +22,8 @@ asm-cleanup = "asm_cleanup.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["asm_cleanup"]
+
+[dependency-groups]
+dev = [
+    "types-pyyaml>=6.0.12.20260408",
+]

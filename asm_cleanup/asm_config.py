@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+if __name__ == "__main__" and __package__ is None:
+    raise SystemExit(
+        "Run this module as a package: python -m asm_cleanup.asm_config "
+        "(from the project root). Do not execute asm_cleanup/asm_config.py by file path."
+    )
+
 from pathlib import Path
 from typing import Self, Union
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from asm_cleanup import HostConfig
+from .host_config import HostConfig
 
 
 class AsmConfigFile(BaseModel):

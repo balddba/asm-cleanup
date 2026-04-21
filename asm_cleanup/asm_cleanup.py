@@ -10,14 +10,14 @@ import subprocess
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
 from fabric import Connection
 
-from asm_cleanup.asm_config import AsmConfigFile
-from asm_cleanup import HostConfig
+from .asm_config import AsmConfigFile
+from .host_config import HostConfig
+from .walk_result import WalkResult
 
 ASMLine = str
 ASMPath = str
@@ -30,20 +30,6 @@ AliasEntry = tuple[str, str, str, str | None]
 DEFAULT_LOG_DIR = Path("logs")
 _DISKGROUP_TOKEN = re.compile(r"^\+?[A-Za-z0-9_$#-]+/?$")
 _DATA_TEMPFILE_ROW = re.compile(r"^(DATAFILE|TEMPFILE)\b.*$")
-
-
-@dataclass(frozen=True)
-class WalkResult:
-    """Per-path walk/analyze/fix outcome used for reporting."""
-
-    asm_path: str
-    display_path: str
-    outfile: Path
-    fixfile: Path
-    files_examined: int
-    alias_rows: int
-    unique_aliases: int
-    fix_written: bool
 
 
 class AsmCleanup:
@@ -89,28 +75,28 @@ class AsmCleanup:
     @property
     def databases(self) -> list[str]:
         """Database names for this host, optionally restricted by a filter.
-    
+
         Returns the list of database names configured in the YAML host profile,
         optionally filtered by the database_filter set during initialization.
-    
+
         Returns:
-            list[str]: List of database names. If no database_filter is set,
-                returns all databases from host_config.databases. If a filter
-                is set, returns only databases that exist in both the host
-                configuration and the filter.
-    
+            list[str]: List of database names after applying optional filter.
+
         Raises:
-            ValueError: If database_filter contains database names that are not
-                defined in the host configuration's databases list.
-    
+            ValueError: If database_filter contains names not in host configuration.
+
         Note:
-            The filter validation ensures that all requested databases exist
-            in the YAML configuration, preventing typos or misconfiguration.
+            Filter validation ensures all requested databases exist in YAML config.
         """
+        # Extract database list from host configuration
         base = list(self.host_config.databases)
+
+        # Return full list if no filter is applied
         if not self._database_filter:
             self.debug(f"databases property: using full host list {base!r} (no filter)")
             return base
+
+        # Identify filter entries that don't match any configured database
         unknown = self._database_filter - set(base)
         self.debug(
             "databases property: "
@@ -118,33 +104,30 @@ class AsmCleanup:
             f"filter={sorted(self._database_filter)!r}, "
             f"unknown_in_filter={sorted(unknown)!r}"
         )
+
+        # Raise error if filter contains invalid database names
         if unknown:
             raise ValueError(
                 f"Databases not defined for this host: {sorted(unknown)}; allowed: {base}. "
                 "Drop --database / database_filter entries that are not listed under this host in YAML, "
                 "or add the missing names to asm.hosts.<host_id>.databases."
             )
+
+        # Filter base list to only include databases in the filter set
         resolved = [d for d in base if d in self._database_filter]
         self.debug(f"databases property: resolved after filter {resolved!r}")
         return resolved
 
     @property
     def disk_groups(self) -> list[str]:
-        """Return the list of disk groups for this host.
-        
-        Retrieves disk groups from the host configuration if explicitly defined
-        in the YAML file. If the YAML disk_groups list is empty or not defined,
-        automatically discovers available disk groups from ASM using asmcmd.
-        
+        """List of disk group names for this host.
+                
         Returns:
-            list[str]: List of disk group names (normalized with leading '+' and
-                uppercase, e.g., ['+DATA', '+FRA']). Returns an empty list if
-                neither configured nor discoverable.
+            list[str]: Disk group names normalized to uppercase with leading '+' (e.g., ['+DATA', '+FRA']).
         
         Note:
-            Discovery is cached after the first call to avoid repeated asmcmd
-            executions. Disk groups are normalized via _normalize_disk_group_token
-            to ensure a consistent format.
+            Returns YAML-configured disk groups if present, otherwise auto-discovers from ASM via asmcmd.
+            Discovery results are cached after first call to avoid repeated asmcmd executions.
         """
         # Get explicitly configured disk groups from YAML
         configured = list(self.host_config.disk_groups)
@@ -152,25 +135,12 @@ class AsmCleanup:
             return configured
         # Fall back to ASM discovery when YAML list is empty
         return self.discover_disk_groups()
-    
+
     def discover_disk_groups(self) -> list[str]:
         """Discover disk groups from ASM when YAML ``disk_groups`` is empty.
 
-        Executes 'asmcmd ls +' to retrieve the list of available ASM disk groups
-        from the Oracle ASM instance. Results are cached after the first call to
-        avoid repeated asmcmd executions. Each discovered disk group is normalized
-        to uppercase with a leading '+' prefix (e.g., '+DATA', '+FRA').
-
         Returns:
-            list[str]: List of discovered disk group names, normalized to uppercase
-                with leading '+' prefix. Returns cached results on subsequent calls.
-                Returns empty list if no disk groups are found or asmcmd fails.
-
-        Note:
-            This method is automatically called by the disk_groups property when
-            the YAML configuration has an empty or missing disk_groups list.
-            Discovery results are cached in _discovered_disk_groups for performance.
-            Duplicate disk groups (case-insensitive) are filtered out.
+            list[str]: Discovered disk group names with leading '+' and uppercase format.
         """
         # Return cached results if already discovered
         if self._discovered_disk_groups is not None:
@@ -186,8 +156,7 @@ class AsmCleanup:
             token = entry.strip()
             if not token:
                 continue
-            # `asmcmd ls +` prints top-level entries like DATA/ or +DATA/.
-            # Validate the token matches expected disk group naming pattern
+            # Validate the token matches expected disk group naming pattern (asmcmd ls + prints entries like DATA/ or +DATA/)
             if not _DISKGROUP_TOKEN.fullmatch(token):
                 self.debug(f"discover_disk_groups: skipping non-diskgroup line {token!r}")
                 continue
@@ -207,7 +176,7 @@ class AsmCleanup:
             seen.add(key)
             discovered.append(normalized)
 
-        # Cache the results
+        # Cache the results for performance on subsequent calls
         self._discovered_disk_groups = discovered
         self.debug(
             "discover_disk_groups: "
@@ -215,101 +184,94 @@ class AsmCleanup:
         )
         return list(discovered)
 
-    def resolve_asm_walk_path(self, asm_path: str | None) -> str:
-        """Resolve the ASM path to walk from explicit argument, YAML default, or inference.
-
-        Resolution priority:
-        1. Explicit asm_path argument (normalized if starts with '+')
-        2. YAML host_config.default_asm_path (normalized if starts with '+')
-        3. Inferred from first disk group + sole database: {disk_group[0]}/{database}
-
-        The inferred form requires exactly one database name in scope (after database_filter)
-        and at least one disk group (configured in YAML or discovered from ASM). For multiple
-        databases or disk groups, set default_asm_path in YAML or pass asm_path explicitly.
-
-        Args:
-            asm_path (str | None): Explicit ASM path to walk (e.g., '+DATA/MYDB').
-                If provided and non-empty after stripping whitespace, this takes
-                precedence over YAML settings and inference. Paths starting with '+'
-                are normalized via normalize_asm_path.
-
-        Returns:
-            str: Resolved ASM path ready for walking. The path is normalized if it
-                starts with '+' (uppercases disk group and intermediate directories,
-                preserves final segment casing).
-
-        Raises:
-            ValueError: If asm_path is None/empty and no YAML host profile is available
-                (local mode requires explicit asm_path).
-            ValueError: If inference is attempted but no disk groups are configured
-                or discoverable from ASM. Requires either YAML disk_groups or
-                successful ASM discovery via 'asmcmd ls +'.
-            ValueError: If inference is attempted but the number of databases in scope
-                (after database_filter) is not exactly one. Inference needs a single
-                unambiguous database name to construct the path.
-
-        Note:
-            For SSH sessions with YAML configuration, the resolved path can come from:
-            - Direct argument (highest priority)
-            - YAML default_asm_path field (medium priority)
-            - Automatic inference from first disk group + sole database (lowest priority)
-
-            Local sessions (no YAML profile) always require an explicit asm_path argument.
-
-            Disk groups are sourced from YAML disk_groups list when present, otherwise
-            discovered from ASM via 'asmcmd ls +' (see discover_disk_groups method).
-        """
-        # Priority 1: Use explicit asm_path argument if provided
-        if asm_path is not None and asm_path.strip():
-            p = asm_path.strip()
-            # Normalize ASM paths starting with '+' to uppercase disk group
-            return self.normalize_asm_path(p) if p.startswith("+") else p
-
-        # Local mode (no YAML profile) requires explicit asm_path
-        if self.host_config is None:
-            raise ValueError(
-                "asm_path is required for local sessions (no YAML host profile). "
-                "Example: ac.run('+DATA/MYDB')."
-            )
-
-        # Priority 2: Use YAML default_asm_path if configured
-        hc = self.host_config
-        if hc.default_asm_path and hc.default_asm_path.strip():
-            p = hc.default_asm_path.strip()
-            self.debug(f"resolve_asm_walk_path: using yaml default_asm_path={p!r}")
-            # Normalize ASM paths starting with '+' to uppercase disk group
-            return self.normalize_asm_path(p) if p.startswith("+") else p
-
-        # Priority 3: Infer path from disk groups and databases
-        # Get disk groups (from YAML or ASM discovery)
-        dgs = self.disk_groups
-        # Get filtered database list
-        dbs = list(self.databases)
-
-        # Validate that at least one disk group is available
-        if not dgs:
-            raise ValueError(
-                "Cannot infer ASM walk path: no disk groups configured and none discovered from ASM. "
-                "Set default_asm_path in YAML or pass asm_path= to run()."
-            )
-
-        # Validate exactly one database for unambiguous inference
-        if len(dbs) != 1:
-            raise ValueError(
-                "Cannot infer ASM walk path: need exactly one database in scope "
-                f"(after filter), got {dbs!r}. Set default_asm_path in YAML, pass asm_path= to run(), "
-                "or narrow --database / database_filter to a single DB."
-            )
-
-        # Construct path from first disk group and sole database
-        dg = dgs[0].strip()
-        # Ensure disk group has leading '+'
-        if not dg.startswith("+"):
-            dg = f"+{dg}"
-        # Build and normalize the inferred path
-        inferred = self.normalize_asm_path(f"{dg.rstrip('/')}/{dbs[0]}")
-        self.debug(f"resolve_asm_walk_path: inferred {inferred!r} from disk_groups[0] + sole database")
-        return inferred
+    # def resolve_asm_walk_path(self, asm_path: str | None) -> str:
+    #     """Resolve the ASM path to walk from explicit argument, YAML default, or inference.
+    #
+    #     Resolution priority:
+    #     1. Explicit asm_path argument (normalized if starts with '+')
+    #     2. YAML host_config.default_asm_path (normalized if starts with '+')
+    #     3. Inferred from first disk group + sole database: {disk_group[0]}/{database}
+    #
+    #     The inferred form requires exactly one database name in scope (after database_filter)
+    #     and at least one disk group (configured in YAML or discovered from ASM). For multiple
+    #     databases or disk groups, set default_asm_path in YAML or pass asm_path explicitly.
+    #
+    #     Args:
+    #         asm_path (str | None): Explicit ASM path to walk (e.g., '+DATA/MYDB').
+    #
+    #     Returns:
+    #         str: Resolved ASM path ready for walking.
+    #
+    #     Raises:
+    #         ValueError: If asm_path is None/empty and no YAML host profile is available.
+    #         ValueError: If inference is attempted but no disk groups are configured or discoverable from ASM.
+    #         ValueError: If inference is attempted but the number of databases in scope is not exactly one.
+    #
+    #     Note:
+    #         For SSH sessions with YAML configuration, the resolved path can come from:
+    #         - Direct argument (highest priority)
+    #         - YAML default_asm_path field (medium priority)
+    #         - Automatic inference from first disk group + sole database (lowest priority)
+    #
+    #         Local sessions (no YAML profile) always require an explicit asm_path argument.
+    #
+    #         Disk groups are sourced from YAML disk_groups list when present, otherwise
+    #         discovered from ASM via 'asmcmd ls +' (see discover_disk_groups method).
+    #     """
+    #     # Priority 1: Use explicit asm_path argument if provided
+    #     if asm_path is not None and asm_path.strip():
+    #         # Strip whitespace from input path
+    #         p = asm_path.strip()
+    #         # Normalize ASM paths starting with '+' to uppercase disk group
+    #         return self.normalize_asm_path(p) if p.startswith("+") else p
+    #
+    #     # Local mode (no YAML profile) requires explicit asm_path
+    #     if self.host_config is None:
+    #         raise ValueError(
+    #             "asm_path is required for local sessions (no YAML host profile). "
+    #             "Example: ac.run('+DATA/MYDB')."
+    #         )
+    #
+    #     # Priority 2: Use YAML default_asm_path if configured
+    #     hc = self.host_config
+    #     if hc.default_asm_path and hc.default_asm_path.strip():
+    #         # Strip whitespace from YAML default path
+    #         p = hc.default_asm_path.strip()
+    #         self.debug(f"resolve_asm_walk_path: using yaml default_asm_path={p!r}")
+    #         # Normalize ASM paths starting with '+' to uppercase disk group
+    #         return self.normalize_asm_path(p) if p.startswith("+") else p
+    #
+    #     # Priority 3: Infer path from disk groups and databases
+    #     # Get disk groups (from YAML or ASM discovery)
+    #     dgs = self.disk_groups
+    #     # Get filtered database list
+    #     dbs = list(self.databases)
+    #
+    #     # Validate that at least one disk group is available
+    #     if not dgs:
+    #         raise ValueError(
+    #             "Cannot infer ASM walk path: no disk groups configured and none discovered from ASM. "
+    #             "Set default_asm_path in YAML or pass asm_path= to run()."
+    #         )
+    #
+    #     # Validate exactly one database for unambiguous inference
+    #     if len(dbs) != 1:
+    #         raise ValueError(
+    #             "Cannot infer ASM walk path: need exactly one database in scope "
+    #             f"(after filter), got {dbs!r}. Set default_asm_path in YAML, pass asm_path= to run(), "
+    #             "or narrow --database / database_filter to a single DB."
+    #         )
+    #
+    #     # Construct path from first disk group and sole database
+    #     # Strip whitespace from disk group
+    #     dg = dgs[0].strip()
+    #     # Ensure disk group has leading '+'
+    #     if not dg.startswith("+"):
+    #         dg = f"+{dg}"
+    #     # Build and normalize the inferred path
+    #     inferred = self.normalize_asm_path(f"{dg.rstrip('/')}/{dbs[0]}")
+    #     self.debug(f"resolve_asm_walk_path: inferred {inferred!r} from disk_groups[0] + sole database")
+    #     return inferred
 
     @staticmethod
     def _normalize_disk_group_token(dg: str) -> str:
@@ -1703,7 +1665,7 @@ ALTER DATABASE MOVE TEMPFILE '{source}' TO '+DATA';
         fixfile: Path | None = None,
         debug: bool = False,
     ) -> None:
-        """Walk ASM directory tree, analyze aliases, and generate OMF migration SQL.
+        """Walk the ASM directory tree, analyze aliases, and generate OMF migration SQL.
 
         Convenience classmethod that initializes an AsmCleanup session (SSH or local) and
         executes the walk/analyze/fix pipeline. With SSH and no asm_path, walks every

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shlex
+from typing import Optional
 
 from pydantic import BaseModel, Field, model_validator
 
