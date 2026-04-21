@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "asm-cleanup"
+version = "0.1.0"
+description = "ASM directory walk, alias analysis, and OMF migration SQL helpers"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fabric>=3.2.3",
+    "pydantic>=2.13.3",
+    "pyyaml>=6.0.3",
+    "rich>=15.0.0",
+    "tool>=0.8.0",
+    "vulture>=2.16",
+]
+
+[project.scripts]
+asm-cleanup = "asm_cleanup.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["asm_cleanup"]
