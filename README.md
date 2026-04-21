@@ -6,7 +6,7 @@ Python helpers for Oracle ASM: run **`asmcmd`** locally or over **SSH** (Fabric)
 
 - **Python 3.13+**
 - **`asmcmd`** available on the target (local shell or remote Grid home)
-- For SSH: key or password in Fabric **`connect_kwargs`**, and a YAML **`asm.hosts`** entry
+- For SSH: key or password in Fabric **`connect_kwargs`**, and a YAML top-level **`targets`** map
 
 ## Install
 
@@ -35,57 +35,56 @@ This exposes the **`asm-cleanup`** console script.
 
 ## Configuration (`config.yaml`)
 
-Use a top-level **`asm:`** key and a **`hosts`** map. Each **key** (`lab`, `prod`, …) is a **host id** you pass to the CLI or API. Values are SSH + Grid settings plus **`databases`** and **`disk_groups`** used by **`monitor_file_access`**.
+Use a top-level **`targets`** map in `config.yaml`. Each **key** (`lab`, `prod`, …) is a **target id** (CLI **`--host`** names which entry to use). Values are SSH + Grid settings plus **`databases`** and **`disk_groups`** used by **`monitor_file_access`**.
 
-**YAML** (example `asm.hosts` fragment; save as e.g. `config.yaml`):
+**YAML** (example fragment; save as e.g. `config.yaml`):
 
 ```yaml
-asm:
-  hosts:
-    lab:
-      host: "grid-lab.example.com"
-      user: "oracle"
-      grid_home: "/u01/app/19c/grid"
-      # Typical fix for ASMCMD-8102 over SSH — see README section below.
-      oracle_sid: "+ASM"
-      use_oraenv: true
-      oraenv_path: "/usr/local/bin/oraenv"
-      monitor_interval: 5
-      monitor_count: 5
-      connect_kwargs:
-        key_filename: "/home/you/.ssh/id_ed25519"
-      disk_groups:
-        - "+DATA"
-        - "+FRA"
-      databases:
-        - MYDB
-        - OTHERDB
-      # Optional: if set, ``ac.run()`` / CLI with no asm_path walks ONLY this path instead of
-      # every disk_groups × databases combination.
-      # default_asm_path: "+DATA/MYDB"
-      # Optional: map each PDB’s 32-hex ASM directory GUID to its PDB name so generated move SQL
-      # can emit ``ALTER SESSION SET CONTAINER`` when switching between PDBs (see below).
-      # pdb_guid_map:
-      #   "49C96937E332EB45E0631A04010ABA14": "TOOLKITPDB"
-    prod:
-      host: "grid-prod.example.com"
-      user: "grid"
-      grid_home: "/u01/app/grid"
-      connect_kwargs:
-        key_filename: "/home/you/.ssh/id_ed25519"
-      disk_groups:
-        - "+DATA"
-      databases:
-        - PRODDB
+targets:
+  lab:
+    host: "grid-lab.example.com"
+    user: "oracle"
+    grid_home: "/u01/app/19c/grid"
+    # Typical fix for ASMCMD-8102 over SSH — see README section below.
+    oracle_sid: "+ASM"
+    use_oraenv: true
+    oraenv_path: "/usr/local/bin/oraenv"
+    monitor_interval: 5
+    monitor_count: 5
+    connect_kwargs:
+      key_filename: "/home/you/.ssh/id_ed25519"
+    disk_groups:
+      - "+DATA"
+      - "+FRA"
+    databases:
+      - MYDB
+      - OTHERDB
+    # Optional: if set, ``ac.run()`` / CLI with no asm_path walks ONLY this path instead of
+    # every disk_groups × databases combination.
+    # default_asm_path: "+DATA/MYDB"
+    # Optional: map each PDB’s 32-hex ASM directory GUID to its PDB name so generated move SQL
+    # can emit ``ALTER SESSION SET CONTAINER`` when switching between PDBs (see below).
+    # pdb_guid_map:
+    #   "49C96937E332EB45E0631A04010ABA14": "TOOLKITPDB"
+  prod:
+    host: "grid-prod.example.com"
+    user: "grid"
+    grid_home: "/u01/app/grid"
+    connect_kwargs:
+      key_filename: "/home/you/.ssh/id_ed25519"
+    disk_groups:
+      - "+DATA"
+    databases:
+      - PRODDB
 ```
 
-**Python script** (load host profile from disk):
+**Python script** (load target config from disk):
 
 ```python
-from asm_cleanup import AsmConfigFile
+from asm_cleanup import load_targets
 
-cfg = AsmConfigFile.load("config.yaml")
-lab = cfg.get_host("lab")
+targets = load_targets("config.yaml")
+lab = targets["lab"]
 print(lab.host, lab.grid_home, lab.databases)
 ```
 
@@ -155,7 +154,7 @@ asm_env_init: |
 Operational examples all use the same layout: a **`###` subheading** under this section as the example title (large type and outline entry on GitHub), then three labeled slots in order:
 
 1. **Python script** — run with `python your_script.py` (or paste into a `*.py` file).
-2. **CLI (no config file)** — local `asmcmd`; no `--ssh` and no `asm.hosts` YAML.
+2. **CLI (no config file)** — local `asmcmd`; no `--ssh` and no `targets` YAML.
 3. **CLI (with config file)** — `--ssh` plus a well-formed `config.yaml` and **`--host`**.
 
 If a slot is not supported for that title, the label is still shown and the body is a short **note** instead of a command.
@@ -201,7 +200,7 @@ with AsmCleanup.ssh("config.yaml", "lab") as ac:
 **CLI (no config file):**
 
 ```text
-Not supported: expanding every disk_groups × databases pair requires asm.hosts in YAML. Use local single-path mode in the previous example, or the SSH command below.
+Not supported: expanding every disk_groups × databases pair requires a `targets` map in YAML. Use local single-path mode in the previous example, or the SSH command below.
 ```
 
 **CLI (with config file):**
@@ -324,16 +323,16 @@ Uses **`monitor_file_access`** (library API; no CLI wrapper).
 ```python
 #!/usr/bin/env python3
 from fabric import Connection
-from asm_cleanup import AsmCleanup, AsmConfigFile
+from asm_cleanup import AsmCleanup, load_targets
 
-root = AsmConfigFile.load("config.yaml")
-profile = root.get_host("lab")
-ac = AsmCleanup(profile, database_filter=["MYDB"])
+targets = load_targets("config.yaml")
+target = targets["lab"]
+ac = AsmCleanup(target, database_filter=["MYDB"])
 
 with Connection(
-    host=profile.host,
-    user=profile.user,
-    connect_kwargs=profile.connect_kwargs,
+    host=target.host,
+    user=target.user,
+    connect_kwargs=target.connect_kwargs,
 ) as conn:
     ac.monitor_file_access(conn)
 ```
@@ -409,7 +408,7 @@ Walk transcripts and generated SQL use **`logs/`** in the process working direct
 | Module | Contents |
 |------|----------|
 | `asm_cleanup.asm_cleanup` | `AsmCleanup`, `DEFAULT_LOG_DIR` — walk / analyze / fix, command runners, monitoring |
-| `asm_cleanup.asm_config` | `AsmConfigFile`, `HostConfig`, `AsmConfigFile.load()` |
+| `asm_cleanup.target_config` | `TargetConfig`, `load_targets()` |
 | `asm_cleanup.cli` | `asm-cleanup` entrypoint |
 
 ---

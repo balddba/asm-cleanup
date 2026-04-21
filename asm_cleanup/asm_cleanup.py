@@ -14,10 +14,46 @@ from typing import Iterator
 
 from fabric import Connection
 
-from .asm_cmd_client import AsmCmdClient
-from .asm_config import AsmConfigFile
-from .host_config import HostConfig
+from .asm_cmd_client import AsmCmdClient, wrap_remote_grid_command
+from .target_config import TargetConfig, load_targets
 from .walk_result import WalkResult
+
+def _merge_ssh_connect_kwargs(connect_kwargs: dict[str, str]) -> dict[str, str]:
+    """Fill ``key_filename`` from ``~/.ssh`` when it is omitted in YAML.
+
+    If ``key_filename`` is already set, ``connect_kwargs`` is returned unchanged.
+    Otherwise looks for ``id_ed25519.pub`` then ``id_rsa.pub`` under the user's
+    ``.ssh`` directory; the matching private key path is used for Fabric.
+
+    Args:
+        connect_kwargs (dict[str, str]): Fabric ``connect_kwargs`` from host profile.
+
+    Returns:
+        dict[str, str]: Copy of kwargs, possibly with ``key_filename`` added.
+
+    Raises:
+        FileNotFoundError: If no suitable public key is found, or the public key
+            exists without its private key alongside it.
+    """
+    merged = dict(connect_kwargs)
+    if merged.get("key_filename"):
+        return merged
+    ssh_dir = Path.home() / ".ssh"
+    for pub_name in ("id_ed25519.pub", "id_rsa.pub"):
+        pub = ssh_dir / pub_name
+        if not pub.is_file():
+            continue
+        private = pub.with_suffix("")
+        if private.is_file():
+            merged["key_filename"] = str(private)
+            return merged
+        raise FileNotFoundError(
+            f"SSH public key exists at {pub} but private key {private} is missing"
+        )
+    raise FileNotFoundError(
+        f"No SSH key found under {ssh_dir}: expected id_ed25519.pub or id_rsa.pub"
+    )
+
 
 ASMLine = str
 ASMPath = str
@@ -37,21 +73,21 @@ class AsmCleanup:
 
     def __init__(
         self,
-        host_config: HostConfig | None = None,
+        target_config: TargetConfig | None = None,
         *,
         connection: Connection | None = None,
         host_id: str | None = None,
         database_filter: list[str] | tuple[str, ...] | None = None,
         debug: bool = False,
     ) -> None:
-        self.host_config: HostConfig = host_config
+        self.target_config: TargetConfig | None = target_config
         self.connection = connection
         self.host_id = host_id
         self._database_filter = frozenset(database_filter) if database_filter else None
         self._discovered_disk_groups: list[str] | None = None
         self._debug = bool(debug) or os.environ.get("ASM_CLEANUP_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
         self._asm_cmd = AsmCmdClient(
-            host_config,
+            target_config,
             connection=connection,
             debug_log=self.debug,
             debug=self._debug,
@@ -59,11 +95,11 @@ class AsmCleanup:
         self.debug(
             "session init: "
             f"host_id={host_id!r}, "
-            f"has_host_config={host_config is not None}, "
+            f"has_target_config={target_config is not None}, "
             f"has_connection={connection is not None}, "
             f"database_filter={sorted(database_filter) if database_filter else None}, "
-            f"use_oraenv={getattr(host_config, 'use_oraenv', None)}, "
-            f"oracle_sid={getattr(host_config, 'oracle_sid', None)!r}"
+            f"use_oraenv={getattr(target_config, 'use_oraenv', None)}, "
+            f"oracle_sid={getattr(target_config, 'oracle_sid', None)!r}"
         )
 
     def debug(self, message: str) -> None:
@@ -95,7 +131,7 @@ class AsmCleanup:
             Filter validation ensures all requested databases exist in YAML config.
         """
         # Extract database list from host configuration
-        base = list(self.host_config.databases)
+        base = list(self.target_config.databases)
 
         # Return full list if no filter is applied
         if not self._database_filter:
@@ -116,7 +152,7 @@ class AsmCleanup:
             raise ValueError(
                 f"Databases not defined for this host: {sorted(unknown)}; allowed: {base}. "
                 "Drop --database / database_filter entries that are not listed under this host in YAML, "
-                "or add the missing names to asm.hosts.<host_id>.databases."
+                "or add the missing names to targets.<host_id>.databases in YAML."
             )
 
         # Filter base list to only include databases in the filter set
@@ -136,7 +172,7 @@ class AsmCleanup:
             Discovery results are cached after first call to avoid repeated asmcmd executions.
         """
         # Get explicitly configured disk groups from YAML
-        configured = list(self.host_config.disk_groups)
+        configured = list(self.target_config.disk_groups)
         if configured:
             return configured
         # Fall back to ASM discovery when YAML list is empty
@@ -195,7 +231,7 @@ class AsmCleanup:
     #
     #     Resolution priority:
     #     1. Explicit asm_path argument (normalized if starts with '+')
-    #     2. YAML host_config.default_asm_path (normalized if starts with '+')
+    #     2. YAML target_config.default_asm_path (normalized if starts with '+')
     #     3. Inferred from first disk group + sole database: {disk_group[0]}/{database}
     #
     #     The inferred form requires exactly one database name in scope (after database_filter)
@@ -232,14 +268,14 @@ class AsmCleanup:
     #         return self.normalize_asm_path(p) if p.startswith("+") else p
     #
     #     # Local mode (no YAML profile) requires explicit asm_path
-    #     if self.host_config is None:
+    #     if self.target_config is None:
     #         raise ValueError(
     #             "asm_path is required for local sessions (no YAML host profile). "
     #             "Example: ac.run('+DATA/MYDB')."
     #         )
     #
     #     # Priority 2: Use YAML default_asm_path if configured
-    #     hc = self.host_config
+    #     hc = self.target_config
     #     if hc.default_asm_path and hc.default_asm_path.strip():
     #         # Strip whitespace from YAML default path
     #         p = hc.default_asm_path.strip()
@@ -381,11 +417,11 @@ class AsmCleanup:
             - Duplicate paths (case-insensitive) are filtered while preserving order
             - When disk_groups is empty in YAML, this method triggers ASM discovery
             - The databases property respects database_filter if set during init
-            - Requires a YAML host profile (SSH session or HostConfig instance)
+            - Requires a YAML target profile (SSH session or TargetConfig instance)
         """
         # Verify that a host profile is available (required for disk groups and databases)
-        if self.host_config is None:
-            raise ValueError("iter_asm_walk_paths requires a host profile (SSH session or HostConfig).")
+        if self.target_config is None:
+            raise ValueError("iter_asm_walk_paths requires a target profile (SSH session or TargetConfig).")
 
         # Initialize result list and set for deduplication (case-insensitive)
         paths: list[str] = []
@@ -559,13 +595,13 @@ class AsmCleanup:
             list[ASMLine]: List of stdout lines from the command execution.
     
         Raises:
-            RuntimeError: If session is in an invalid state (connection and host_config
+            RuntimeError: If session is in an invalid state (connection and target_config
                 must be both set for SSH mode or both unset for local mode).
     
         Note:
             Valid session states:
-            - SSH mode: Both _connection and host_config are set (non-None)
-            - Local mode: Both _connection and host_config are unset (None)
+            - SSH mode: Both _connection and target_config are set (non-None)
+            - Local mode: Both _connection and target_config are unset (None)
             Invalid states raise RuntimeError to prevent configuration errors.
         """
         return self._asm_cmd.run_shell_command(cmd)
@@ -594,7 +630,7 @@ class AsmCleanup:
             # Construct the asmcmd lsof command with full binary path
             lsof_line = f"{self.asmcmd_bin()} lsof"
             # Wrap command with Grid Infrastructure environment setup (oraenv sourcing)
-            script = self.host_config.wrap_remote_grid_command(lsof_line)
+            script = wrap_remote_grid_command(self.target_config, lsof_line)
             # Quote script for safe execution via bash login shell
             wrapped = f"bash -lc {shlex.quote(script)}"
             # Log wrapper script metadata in debug mode
@@ -658,8 +694,8 @@ class AsmCleanup:
             Exception: Re-raises any exception from databases/disk_groups property access.
         """
         # Get monitoring configuration from host profile
-        monitor_count = self.host_config.monitor_count
-        monitor_interval = self.host_config.monitor_interval
+        monitor_count = self.target_config.monitor_count
+        monitor_interval = self.target_config.monitor_interval
         self.debug(
             "monitor_file_access: starting "
             f"monitor_count={monitor_count} interval={monitor_interval}s"
@@ -750,7 +786,7 @@ class AsmCleanup:
 
         Args:
             config_path (str | Path): Path to YAML configuration file containing host profiles.
-            host_id (str): Host identifier key under asm.hosts in the YAML file (e.g., 'lab').
+            host_id (str): Target id key under ``targets`` in the YAML file (e.g., 'lab').
             databases (list[str] | tuple[str, ...] | None): Optional filter to restrict operations to specific databases.
             debug (bool): Enable debug logging output to stdout.
 
@@ -758,14 +794,19 @@ class AsmCleanup:
             Iterator[AsmCleanup]: Configured AsmCleanup instance with active SSH connection and host profile.
 
         Raises:
-            FileNotFoundError: If config_path does not exist.
-            KeyError: If host_id is not found in the YAML asm.hosts section.
+            FileNotFoundError: If config_path does not exist, or if ``key_filename`` is
+                omitted and neither ``~/.ssh/id_ed25519.pub`` nor ``~/.ssh/id_rsa.pub`` is
+                present (or the matching private key file is missing).
+            KeyError: If host_id is not found in the YAML ``targets`` section.
             ValueError: If YAML structure is invalid or required fields are missing.
 
         Note:
             The SSH connection uses authentication parameters from the host profile's
-            connect_kwargs field (typically SSH key path). The connection is automatically
-            closed when exiting the context manager, ensuring proper resource cleanup.
+            ``connect_kwargs`` (typically ``key_filename``). If ``key_filename`` is not
+            set, the default key is inferred from ``~/.ssh/id_ed25519.pub`` then
+            ``id_rsa.pub`` (using the sibling private key file). The connection is
+            automatically closed when exiting the context manager, ensuring proper
+            resource cleanup.
         """
 
         # Log initial connection parameters in debug mode
@@ -777,26 +818,29 @@ class AsmCleanup:
             )
 
         # Load YAML configuration file and extract host profile
-        root = AsmConfigFile.load(config_path)
-        profile = root.get_host(host_id)
+        targets = load_targets(config_path)
+        if host_id not in targets:
+            known = ", ".join(sorted(targets))
+            raise KeyError(f"Unknown target id {host_id!r}; configured targets: {known}")
+        target = targets[host_id]
 
         # Log resolved connection details in debug mode
         if debug:
             print(
-                f"[AsmCleanup:debug] ssh: resolved ssh_host={profile.host!r} user={profile.user!r} "
-                f"grid_home={profile.grid_home!r} yaml_databases={profile.databases!r}",
+                f"[AsmCleanup:debug] ssh: resolved ssh_host={target.host!r} user={target.user!r} "
+                f"grid_home={target.grid_home!r} yaml_databases={target.databases!r}",
                 flush=True,
             )
 
-        # Establish SSH connection using Fabric with host profile settings
+        # Establish SSH connection using Fabric with target profile settings
         with Connection(
-                host=profile.host,
-                user=profile.user,
-                connect_kwargs=profile.connect_kwargs,
+                host=target.host,
+                user=target.user,
+                connect_kwargs=_merge_ssh_connect_kwargs(target.connect_kwargs),
         ) as conn:
             # Yield configured AsmCleanup instance with active connection
             yield cls(
-                profile,
+                target,
                 connection=conn,
                 host_id=host_id,
                 database_filter=databases,
@@ -826,7 +870,7 @@ class AsmCleanup:
         # Log session initialization in debug mode
         if bool(debug):
             print("[AsmCleanup:debug] local: no YAML host profile", flush=True)
-        # Yield AsmCleanup instance with no host_config or connection (local mode)
+        # Yield AsmCleanup instance with no target_config or connection (local mode)
         yield cls(debug=debug)
 
     def walk_directory(
@@ -841,7 +885,7 @@ class AsmCleanup:
         Traverses the specified ASM directory path and all subdirectories, collecting
         file listings via 'asmcmd ls -l' commands. Output lines from each directory are
         appended to the out_lines list. Automatically routes commands through SSH or local
-        subprocess based on session mode (determined by presence of connection/host_config).
+        subprocess based on session mode (determined by presence of connection/target_config).
 
         Args:
             path (str): ASM directory path to walk (e.g., '+DATA/MYDB/DATAFILE').
@@ -1201,7 +1245,7 @@ class AsmCleanup:
                     g = label.split(":", 1)[1]
                     # Add comment with GUID lookup hint instead of ALTER SESSION
                     sql.append(
-                        f"-- PDB ASM GUID {g} not in pdb_guid_map; add asm.hosts.<id>.pdb_guid_map then regenerate.\n"
+                        f"-- PDB ASM GUID {g} not in pdb_guid_map; add targets.<id>.pdb_guid_map in YAML then regenerate.\n"
                         f"-- Hint: SELECT name, guid FROM v$pdbs;"
                     )
                 else:
@@ -1297,7 +1341,7 @@ ALTER DATABASE MOVE TEMPFILE '{source}' TO '+DATA';
         Note:
             Creates parent directories for outfile and fixfile if they don't exist.
             The fix phase only generates SQL when aliases are found in the analyze phase.
-            PDB GUID mappings are loaded from host_config when available for container switching.
+            PDB GUID mappings are loaded from target_config when available for container switching.
         """
         # Initialize storage for walk output lines and extracted alias entries
         out_lines: list[ASMLine] = []
@@ -1332,9 +1376,9 @@ ALTER DATABASE MOVE TEMPFILE '{source}' TO '+DATA';
             if aliases:
                 # Load PDB GUID mappings from YAML host config if available
                 pdb_map: dict[str, str] = {}
-                if self.host_config is not None:
+                if self.target_config is not None:
                     # Normalize GUID keys to uppercase for case-insensitive lookups
-                    pdb_map = {k.upper(): v for k, v in self.host_config.pdb_guid_map.items()}
+                    pdb_map = {k.upper(): v for k, v in self.target_config.pdb_guid_map.items()}
                 # Generate ALTER DATABASE MOVE statements with container switching
                 sql = self.generate_fix_script(aliases, pdb_guid_map=pdb_map)
                 # Write SQL script to disk
@@ -1425,15 +1469,15 @@ ALTER DATABASE MOVE TEMPFILE '{source}' TO '+DATA';
                 "chosen per path (or use default_asm_path in YAML for a single path)."
             )
         # Validate that local mode (no YAML profile) requires explicit asm_path
-        if self.host_config is None:
+        if self.target_config is None:
             raise ValueError(
                 "local mode requires asm_path= (there is no YAML host profile to expand)."
             )
         # Check if YAML default_asm_path is configured (single-path alternative)
-        default_only = bool(self.host_config.default_asm_path and self.host_config.default_asm_path.strip())
+        default_only = bool(self.target_config.default_asm_path and self.target_config.default_asm_path.strip())
         if default_only:
             # Single-path workflow using YAML default_asm_path setting
-            raw = self.host_config.default_asm_path.strip()
+            raw = self.target_config.default_asm_path.strip()
             # Normalize ASM paths starting with '+' to uppercase disk group
             resolved = self.normalize_asm_path(raw) if raw.startswith("+") else raw
             self.debug(f"run: single walk from yaml default_asm_path={resolved!r}")
@@ -1618,7 +1662,7 @@ ALTER DATABASE MOVE TEMPFILE '{source}' TO '+DATA';
             asm_path (str | None): Explicit ASM path to walk (e.g., '+DATA/MYDB').
             ssh (bool): Use SSH mode with YAML host profile when True, local mode otherwise.
             config (str): Path to YAML configuration file (required for SSH mode).
-            host_id (str | None): Host identifier key under asm.hosts in YAML (required for SSH).
+            host_id (str | None): Target id under ``targets`` in YAML (required for SSH; CLI ``--host``).
             databases (list[str] | None): Optional filter to restrict operations to specific databases.
             no_walk (bool): Skip ASM directory tree walk phase when True.
             no_analyze (bool): Skip alias extraction analysis phase when True.

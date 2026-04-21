@@ -31,14 +31,14 @@ def main() -> None:
     parser.add_argument(
         "--ssh",
         action="store_true",
-        help="Run asmcmd on the remote host using Fabric (requires --host and asm.hosts in YAML).",
+        help="Run asmcmd on the remote host using Fabric (requires --host and targets: in YAML).",
     )
     # Path to YAML configuration file containing host and connection settings
     parser.add_argument(
         "--config",
         type=str,
         default="config.yaml",
-        help="YAML path containing an asm: block (used with --ssh).",
+        help="YAML path with top-level targets: (used with --ssh).",
     )
     # Specify which host from the config file to connect to (required with --ssh)
     parser.add_argument(
@@ -46,7 +46,7 @@ def main() -> None:
         "-H",
         metavar="HOST_ID",
         dest="host_id",
-        help="Host id from asm.hosts in config (required with --ssh).",
+        help="Target id from targets: in config (required with --ssh).",
     )
     # Filter to specific database(s) on the target host (can be repeated)
     parser.add_argument(

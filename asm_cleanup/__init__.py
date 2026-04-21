@@ -2,16 +2,15 @@
 
 from .asm_cmd_client import AsmCmdClient
 from .asm_cleanup import DEFAULT_LOG_DIR, AliasEntry, ASMLine, ASMPath, AsmCleanup
-from .asm_config import AsmConfigFile
-from .host_config import HostConfig
+from .target_config import TargetConfig, load_targets
 
 __all__ = [
     "DEFAULT_LOG_DIR",
     "AsmCmdClient",
-    "AsmConfigFile",
     "ASMLine",
     "ASMPath",
     "AliasEntry",
     "AsmCleanup",
-    "HostConfig",
+    "TargetConfig",
+    "load_targets",
 ]

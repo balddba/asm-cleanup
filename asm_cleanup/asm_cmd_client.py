@@ -8,26 +8,79 @@ from collections.abc import Callable
 
 from fabric import Connection
 
-from .host_config import HostConfig
+from .target_config import TargetConfig
+
+
+def wrap_remote_grid_command(target_config: TargetConfig, cmd: str) -> str:
+    """Build a shell script that runs ``cmd`` in the host's Grid/ASM environment.
+
+    Args:
+        target_config (TargetConfig): Target profile with Grid/ASM env settings.
+        cmd (str): Shell command to execute after environment setup.
+
+    Returns:
+        str: Script with initialization followed by ``cmd``.
+
+    Notes:
+        Initialization order:
+        1. ``asm_env_init`` when set
+        2. ``oraenv`` when ``use_oraenv`` is True
+        3. Simple ``ORACLE_HOME`` / ``ORACLE_SID`` exports when ``oracle_sid`` is set
+        4. Otherwise ``cmd`` unchanged
+    """
+    cmd = cmd.strip()
+
+    if target_config.asm_env_init:
+        return f"{target_config.asm_env_init.strip()}\n{cmd}"
+
+    if target_config.use_oraenv:
+        assert target_config.oracle_sid is not None
+        sid = shlex.quote(target_config.oracle_sid)
+        op = shlex.quote(target_config.oraenv_path)
+        return (
+            f"export ORACLE_SID={sid}\n"
+            f"export ORAENV_ASK=NO\n"
+            f". {op}\n"
+            f"{cmd}"
+        )
+
+    if target_config.oracle_sid:
+        oh_raw = (target_config.oracle_home or target_config.grid_home).rstrip("/")
+        oh = shlex.quote(oh_raw)
+        sid = shlex.quote(target_config.oracle_sid)
+        lines = [
+            f"export ORACLE_HOME={oh}",
+            f"export ORACLE_SID={sid}",
+        ]
+        if target_config.oracle_base:
+            lines.append(f"export ORACLE_BASE={shlex.quote(target_config.oracle_base)}")
+        lines.append("export PATH=$ORACLE_HOME/bin:$PATH")
+        lines.append(
+            "export LD_LIBRARY_PATH=$ORACLE_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        )
+        lines.append(cmd)
+        return "\n".join(lines)
+
+    return cmd
 
 
 class AsmCmdClient:
     """Execute ``asmcmd`` via subprocess (local) or Fabric (remote).
 
-    Remote mode uses ``HostConfig.wrap_remote_grid_command`` and resolves the
+    Remote mode uses :func:`wrap_remote_grid_command` and resolves the
     ``asmcmd`` binary under ``grid_home``. Local mode (no SSH session) invokes
     ``asmcmd`` from the shell ``PATH``.
     """
 
     def __init__(
         self,
-        host_config: HostConfig | None = None,
+        target_config: TargetConfig | None = None,
         *,
         connection: Connection | None = None,
         debug_log: Callable[[str], None] | None = None,
         debug: bool = False,
     ) -> None:
-        self.host_config = host_config
+        self.target_config = target_config
         self.connection = connection
         self._debug_log = debug_log
         self._debug_enabled = bool(debug)
@@ -38,9 +91,9 @@ class AsmCmdClient:
 
     def asmcmd_bin(self) -> str:
         """Return the absolute path to ``asmcmd`` under ``grid_home``."""
-        if self.host_config is None:
-            raise RuntimeError("asmcmd_bin requires HostConfig (grid_home).")
-        gh = self.host_config.grid_home.rstrip("/")
+        if self.target_config is None:
+            raise RuntimeError("asmcmd_bin requires TargetConfig (grid_home).")
+        gh = self.target_config.grid_home.rstrip("/")
         return f"{gh}/bin/asmcmd"
 
     def run_asmcmd(self, arguments: str) -> list[str]:
@@ -77,8 +130,8 @@ class AsmCmdClient:
         Raises:
             RuntimeError: If SSH connection or host profile is not configured.
         """
-        if self.connection is None or self.host_config is None:
-            raise RuntimeError("Remote command execution requires SSH connection and host profile.")
+        if self.connection is None or self.target_config is None:
+            raise RuntimeError("Remote command execution requires SSH connection and target profile.")
 
         stripped = cmd.lstrip()
         if stripped.startswith("asmcmd "):
@@ -87,7 +140,7 @@ class AsmCmdClient:
         else:
             adapted = cmd
 
-        script = self.host_config.wrap_remote_grid_command(adapted)
+        script = wrap_remote_grid_command(self.target_config, adapted)
         wrapped = f"bash -lc {shlex.quote(script)}"
 
         self._debug(
@@ -112,18 +165,18 @@ class AsmCmdClient:
     def run_shell_command(self, cmd: str) -> list[str]:
         """Run a shell command locally or remotely depending on session mode.
 
-        Valid modes: both ``connection`` and ``host_config`` set (SSH), or both
+        Valid modes: both ``connection`` and ``target_config`` set (SSH), or both
         unset (local). Same rules as :class:`~asm_cleanup.AsmCleanup` sessions.
 
         Raises:
-            RuntimeError: If only one of connection / host_config is set.
+            RuntimeError: If only one of connection / target_config is set.
         """
-        if self.connection is not None and self.host_config is not None:
+        if self.connection is not None and self.target_config is not None:
             return self.run_remote_shell_command(cmd)
 
-        if self.connection is None and self.host_config is None:
+        if self.connection is None and self.target_config is None:
             return self.run_local_shell_command(cmd)
 
         raise RuntimeError(
-            "run_shell_command needs SSH (connection + host profile) or local mode (both unset)."
+            "run_shell_command needs SSH (connection + target profile) or local mode (both unset)."
         )
