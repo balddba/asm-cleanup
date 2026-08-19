@@ -12,10 +12,13 @@ from pathlib import Path
 
 from loguru import logger
 
+from asm_cleanup.config.move_policy import MovePolicy
 from asm_cleanup.db.db_manager import DbManager
 from asm_cleanup.db.scan import Scan
 from asm_cleanup.db.scan_alias import ScanAlias
 from asm_cleanup.db.target import Target
+from asm_cleanup.domain.alias_record import AliasRecord
+from asm_cleanup.sql.move_sql_emitter import MoveSqlEmitter
 
 DEFAULT_DEMO_DB_PATH = Path("docs/demo/asm_cleanup_demo.db")
 PRODUCTION_DB_BASENAMES = frozenset({"asm_cleanup.db"})
@@ -23,44 +26,6 @@ PRODUCTION_DB_BASENAMES = frozenset({"asm_cleanup.db"})
 _SALES_PDB_GUID = "49C96937E332EB45E0631A04010ABA14"
 _HR_PDB_GUID = "5061D3DDBF80C747E0631A04010AB48B"
 _FIN_PDB_GUID = "61A2B4CCD091D858E0631A04010AC59C"
-
-_PROD_GENERATED_SQL = json.dumps(
-    {
-        "salescdb": """\
--- Review-only OMF MOVE script (demo data; not executed by asm-cleanup)
--- Target: prod-grid-01 / SALESCDB -> +DATA
-
-ALTER DATABASE MOVE DATAFILE '+DATA/SALESCDB/datafile/system_custom.dbf' TO '+DATA';
-ALTER DATABASE MOVE DATAFILE '+DATA/SALESCDB/datafile/sysaux_custom.dbf' TO '+DATA';
-ALTER DATABASE MOVE DATAFILE '+DATA/SALESCDB/datafile/undotbs1.dbf' TO '+DATA';
-ALTER DATABASE MOVE DATAFILE '+DATA/SALESCDB/datafile/users.dbf' TO '+DATA';
-ALTER DATABASE MOVE DATAFILE '+DATA/SALESCDB/tempfile/temp01.dbf' TO '+DATA';
-ALTER DATABASE MOVE DATAFILE '+DATA/SALESCDB/49C96937E332EB45E0631A04010ABA14/datafile/system.dbf' TO '+DATA';
-ALTER DATABASE MOVE DATAFILE '+DATA/SALESCDB/49C96937E332EB45E0631A04010ABA14/datafile/sysaux.dbf' TO '+DATA';
-ALTER DATABASE MOVE DATAFILE '+DATA/SALESCDB/49C96937E332EB45E0631A04010ABA14/datafile/users.dbf' TO '+DATA';
-""",
-        "hrcdb": """\
--- Review-only OMF MOVE script (demo data; not executed by asm-cleanup)
--- Target: prod-grid-01 / HRCDB -> +DATA
-
-ALTER DATABASE MOVE DATAFILE '+DATA/HRCDB/datafile/system_custom.dbf' TO '+DATA';
-ALTER DATABASE MOVE DATAFILE '+DATA/HRCDB/5061D3DDBF80C747E0631A04010AB48B/datafile/system.dbf' TO '+DATA';
-ALTER DATABASE MOVE DATAFILE '+DATA/HRCDB/5061D3DDBF80C747E0631A04010AB48B/tempfile/temp.dbf' TO '+DATA';
-""",
-    }
-)
-
-_LAB_GENERATED_SQL = json.dumps(
-    {
-        "fincdb": """\
--- Review-only OMF MOVE script (demo data; not executed by asm-cleanup)
--- Target: lab-asm / FINCDB -> +DATA
-
-ALTER DATABASE MOVE DATAFILE '+DATA/FINCDB/datafile/users_custom.dbf' TO '+DATA';
-ALTER DATABASE MOVE DATAFILE '+DATA/FINCDB/61A2B4CCD091D858E0631A04010AC59C/datafile/system.dbf' TO '+DATA';
-"""
-    }
-)
 
 
 class ProductionDatabaseError(ValueError):
@@ -81,6 +46,40 @@ def assert_not_production_database(path: Path) -> None:
             f"Refusing to write demo data to production database path {path}. "
             "Use docs/demo/asm_cleanup_demo.db (or another non-production filename)."
         )
+
+
+def _render_demo_sql(aliases: list[ScanAlias], destination_disk_group: str) -> str:
+    """Render demo SQL through the production emitter.
+
+    Args:
+        aliases (list[ScanAlias]): Seed aliases for one completed scan.
+        destination_disk_group (str): Destination disk group for generated SQL.
+
+    Returns:
+        str: JSON-encoded map of database names to generated SQL scripts.
+    """
+    records = [
+        AliasRecord(
+            file_type=alias.file_type,
+            source_path=alias.source_path,
+            target_path=alias.target_path,
+            pdb_guid=alias.pdb_guid,
+            disk_group=AliasRecord.disk_group_from_asm_path(alias.source_path),
+            database_name=alias.database_name,
+        )
+        for alias in aliases
+    ]
+    pdb_guid_map = {
+        alias.pdb_guid: alias.container_name
+        for alias in aliases
+        if alias.pdb_guid and alias.container_name
+    }
+    policy = MovePolicy(
+        destination_disk_group=destination_disk_group,
+        pdb_guid_map=pdb_guid_map,
+        auto_pdb_guid_map=False,
+    )
+    return json.dumps(MoveSqlEmitter(policy).emit_by_database(records))
 
 
 def build_demo_database(output_path: Path | None = None) -> Path:
@@ -179,7 +178,6 @@ def build_demo_database(output_path: Path | None = None) -> Path:
             grid_home="/u01/app/19.0.0/grid",
             disk_groups=json.dumps(["+DATA", "+FRA"]),
             databases=json.dumps(prod_db_meta),
-            generated_sql=_PROD_GENERATED_SQL,
             created_at=now,
         )
         lab_scan = Scan(
@@ -190,7 +188,6 @@ def build_demo_database(output_path: Path | None = None) -> Path:
             grid_home="/u01/app/19.0.0/grid",
             disk_groups=json.dumps(["+DATA", "+FRA"]),
             databases=json.dumps(lab_db_meta),
-            generated_sql=_LAB_GENERATED_SQL,
             created_at=older,
         )
         session.add_all([prod_scan, lab_scan])
@@ -328,6 +325,14 @@ def build_demo_database(output_path: Path | None = None) -> Path:
                 created_at=older,
             ),
         ]
+        prod_aliases = [alias for alias in aliases if alias.scan_id == prod_scan.id]
+        lab_aliases = [alias for alias in aliases if alias.scan_id == lab_scan.id]
+        prod_scan.generated_sql = _render_demo_sql(
+            prod_aliases, prod.destination_disk_group
+        )
+        lab_scan.generated_sql = _render_demo_sql(
+            lab_aliases, lab.destination_disk_group
+        )
         session.add_all(aliases)
 
     db_manager.engine.dispose()

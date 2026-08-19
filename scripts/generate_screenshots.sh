@@ -61,4 +61,4 @@ STARTED_DEMO=1
 echo "==> Capturing screenshots at $BASE_URL"
 uv run --group docs python scripts/capture_docs_screenshots.py --base-url "$BASE_URL"
 
-echo "==> Done. Wrote docs/images/01-login.png … 04-scan-results.png"
+echo "==> Done. Wrote docs/images/01-login.png … 05-generated-sql.png"

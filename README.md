@@ -1,4 +1,14 @@
-# asm-cleanup
+<p align="center">
+  <img src="docs/images/logo.png" alt="ASM Clean-Up Logo" width="280">
+</p>
+
+<h1 align="center">asm-cleanup</h1>
+
+<p align="center">
+  <b>Automate Oracle ASM Alias Inventory, DB Storage Mapping, and OMF Relocation</b>
+</p>
+
+---
 
 Walk Oracle ASM, inventory DATAFILE/TEMPFILE aliases, and emit review-only OMF **MOVE** SQL. The **primary interface is the web GUI**: connect over SSH, run discovery scans, review alias inventory, and download generated SQL — without writing YAML or calling the library API.
 
@@ -25,10 +35,10 @@ When converting non-container databases (non-CDB) to container databases (CDB), 
 cd /path/to/asm-cleanup
 uv sync --extra web --group dev
 ./scripts/setup_env.sh   # generates password, JWT secret, and keyring key
-uv run asm-cleanup web
+uv run --env-file .env asm-cleanup web
 ```
 
-Open **http://127.0.0.1:8000**, sign in with the shared password, add a connection, and trigger a discovery scan from the UI.
+Open **http://127.0.0.1:8000**, sign in with the shared password, add a connection, and trigger a discovery scan from the UI. The local server uses `asm_cleanup.db` and `ssh_keys.cryptfile.cfg` in the repository root by default.
 
 | Env var | Required | Purpose |
 |---------|----------|---------|
@@ -38,6 +48,10 @@ Open **http://127.0.0.1:8000**, sign in with the shared password, add a connecti
 | `ASM_CLEANUP_KEYRING_FILE` | no | Cryptfile path (default: next to the SQLite database) |
 | `ASM_CLEANUP_JWT_TTL_SECONDS` | no | Token lifetime (default `86400`) |
 | `ASM_CLEANUP_TIMEZONE` | no | Timezone for generated files and database records (default `UTC`, e.g., `America/Detroit`) |
+| `DATABASE_URL` | no | SQLAlchemy database URL (default `sqlite:///asm_cleanup.db`) |
+| `ASM_CLEANUP_DEMO_PORT` | no | Host port for the Docker `web-demo` service (default `8001`) |
+
+`ASM_CLEANUP_PORT` changes the host port published by Docker Compose. For a local `uv run`, use `asm-cleanup web --host HOST --port PORT`.
 
 ### Docker
 
@@ -71,7 +85,7 @@ Manual equivalent:
 docker compose up --build web-demo
 uv sync --extra web --group docs
 uv run --group docs playwright install chromium
-uv run --group docs python scripts/capture_docs_screenshots.py --base-url http://127.0.0.1:8001
+uv run --env-file .env --group docs python scripts/capture_docs_screenshots.py --base-url http://127.0.0.1:8001
 ```
 
 After schema migrations, rebuild the committed demo DB (does not touch your real `asm_cleanup.db`):
@@ -101,6 +115,7 @@ Click **+ Add Connection** and enter SSH details for the Grid/Oracle host. Grid 
 |-------|----------|-------|
 | Connection Name | yes | Unique profile name (also used by CLI `run`) |
 | Destination Disk Group | yes | Target disk group for MOVE commands (default `+DATA`) |
+| Move online | no | Add `ONLINE` to generated MOVE statements (default off) |
 | SSH Hostname / IP | yes | Remote host |
 | SSH Username | yes | Typically `oracle` or `grid` |
 | SSH Key Path / Content | no | Path on the app host, or a pasted private key stored in the encrypted cryptfile (`ASM_CLEANUP_KEYRING_KEY`); standard keys auto-discovered when omitted |
@@ -112,7 +127,7 @@ Select a saved connection and click **Trigger Discovery Scan**. The runner disco
 
 ### 4. Review results and SQL
 
-Completed scans show Grid metadata, discovered databases, the alias inventory table, and generated OMF MOVE SQL. Use **Download Script** or **Copy Script** to take the SQL offline for review — nothing is executed against the database.
+Completed scans show Grid metadata, discovered databases, the alias inventory table, and generated OMF MOVE SQL. Multi-database scans provide one SQL tab per database; **Download Script** and **Copy Script** use the active tab. Nothing is executed against the database.
 
 ![Scan results](docs/images/04-scan-results.png)
 
@@ -135,7 +150,7 @@ CLI and Python APIs are available for automation and scripting. Day-to-day use s
 
 ```bash
 uv run asm-cleanup --help
-uv run asm-cleanup run my-target-name
+uv run --env-file .env asm-cleanup run my-target-name
 ```
 
 `POST /api/auth/login` with `{ "password": "..." }` returns a bearer token; other `/api/*` routes require `Authorization: Bearer <token>`. Library / `run` / `db` CLI paths are not JWT-gated.
@@ -187,11 +202,12 @@ from asm_cleanup import AsmSession, ConnectionConfig, MovePolicy, ScopeConfig
 with AsmSession.open(connection, scope=scope, move_policy=move_policy) as session:
     inventory = session.walk("+DATA/MYDB")
     aliases = inventory.extract_aliases()
-    sql = session.emit_sql(inventory)
-    results = session.run()  # full pipeline; writes transcript / .sql / .json
+    sql = session.emit_sql(aliases)
 ```
 
-Start from [`config.example.yaml`](config.example.yaml) for library-only config shapes. CLI/web targets live in SQLite (not YAML).
+Use `session.run()` instead when you want the complete pipeline to walk, analyze, emit SQL, and write transcript, SQL, and JSON artifacts.
+
+The library API accepts validated Pydantic configuration objects directly; there is no YAML loader. CLI/web target profiles live in SQLite.
 
 ### PDB GUID map and SQL emit
 
@@ -199,7 +215,7 @@ Multitenant ASM paths often use `+DG/DB/<32-hex-GUID>/DATAFILE|TEMPFILE/`.
 
 **Web/CLI discovery scans:** collect GUID maps during host discovery, inject `PDB_GUID_<prefix>` placeholders for any remaining unmapped GUIDs, and emit with `fail_on_unmapped=False` so a scan can still produce review SQL.
 
-**Library API:** set `move_policy.auto_pdb_guid_map: true` (default) to fetch via srvctl + sqlplus before emit, or provide a manual `pdb_guid_map`. **Unmapped GUIDs fail emit** (`UnmappedPdbGuidError`) — inventory still succeeds.
+**Library API:** `MovePolicy(..., auto_pdb_guid_map=True)` is the default and fetches mappings via srvctl + sqlplus before emit; you can also provide a manual `pdb_guid_map`. **Unmapped GUIDs fail emit** (`UnmappedPdbGuidError`) — inventory still succeeds.
 
 ### ASMCMD-8102 over SSH
 
@@ -242,6 +258,8 @@ Multi-path walks add a sequence segment (`_00_`, `_01_`, …) to the filename sl
 
 ### Generated MOVE SQL (CDB$ROOT)
 
+Every generated script starts with a mandatory review warning. The excerpts below show the MOVE blocks that follow it.
+
 ```sql
 -- =========================================================
 -- FIX DATAFILE
@@ -271,14 +289,18 @@ ALTER DATABASE MOVE DATAFILE '+DATA/MYDB/49C96937E332EB45E0631A04010ABA14/DATAFI
 
 ```
 asm_cleanup/
+  __main__.py   # python -m asm_cleanup entry point
   cli.py
+  logging_config.py
+  auth/         # JWT, shared-password auth, encrypted SSH key storage
+  schemas/      # Web API request and response models
   web/          # FastAPI app, routers, auth deps
   static/       # Web UI assets
   config/       # ConnectionConfig, ScopeConfig, MovePolicy
   transport/    # AsmCmdPort, LocalShellAdapter, SshGridAdapter
   walk/         # AsmWalker, AsmInventory, transcript I/O
   domain/       # AliasRecord, path helpers
-  sql/          # MoveSqlEmitter (fail-fast unmapped GUIDs)
+  sql/          # MoveSqlEmitter (strict by default; scans allow placeholders)
   pipeline/     # AsmSession, PipelineOrchestrator, WalkScopeResolver
   services/     # ConnectionFactory, ScanService, AliasEnricher, TargetMapper
   report/       # human + JSON reporters

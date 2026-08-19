@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="100%" height="100%">
+  <defs>
+    <!-- Vibrant Cyan Gradient -->
+    <linearGradient id="asmCyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00E5FF" />
+      <stop offset="100%" stop-color="#0088FF" />
+    </linearGradient>
+
+    <!-- Warm Amber Accent Gradient -->
+    <linearGradient id="asmAmber" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFB703" />
+      <stop offset="100%" stop-color="#FF8500" />
+    </linearGradient>
+
+    <!-- Metallic/Disks Top Cap Gradient -->
+    <linearGradient id="asmTop" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#E0F7FF" />
+      <stop offset="100%" stop-color="#00C6FF" />
+    </linearGradient>
+    
+    <!-- White border glow for dual light/dark background legibility -->
+    <filter id="lightGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.25" />
+    </filter>
+  </defs>
+
+  <g filter="url(#lightGlow)">
+    <!-- Base Outer Contrast Outline for visibility on both dark & light backgrounds -->
+    <g stroke="#FFFFFF" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity="0.95">
+      <!-- Database Body Outline -->
+      <path d="M 35 32 C 35 24, 75 24, 75 32 L 75 78 C 75 86, 35 86, 35 78 Z" />
+      <!-- Orbital Arrow Outline -->
+      <path d="M 22 64 C 18 42, 42 22, 70 20 C 88 19, 98 28, 96 42 C 94 56, 75 72, 48 82 L 40 92 L 60 88" />
+    </g>
+
+    <!-- Main Database Cylinders -->
+    <!-- Disk 3 (Bottom) -->
+    <path d="M 36 62 L 36 76 C 36 84, 74 84, 74 76 L 74 62 Z" fill="url(#asmCyan)" />
+    <ellipse cx="55" cy="62" rx="19" ry="7" fill="#00A3E0" />
+
+    <!-- Disk 2 (Middle - Amber Accent for Oracle storage) -->
+    <path d="M 36 46 L 36 60 C 36 68, 74 68, 74 60 L 74 46 Z" fill="url(#asmAmber)" />
+    <ellipse cx="55" cy="46" rx="19" ry="7" fill="#E69500" />
+
+    <!-- Disk 1 (Top) -->
+    <path d="M 36 30 L 36 44 C 36 52, 74 52, 74 44 L 74 30 Z" fill="url(#asmCyan)" />
+    <ellipse cx="55" cy="30" rx="19" ry="7" fill="url(#asmTop)" />
+
+    <!-- Sleek Orbital Swoosh / Clean-up Arrow -->
+    <path d="M 20 62 C 16 40, 42 18, 72 18 C 92 18, 102 28, 98 44 C 94 60, 72 76, 42 86" 
+          fill="none" stroke="url(#asmCyan)" stroke-width="7" stroke-linecap="round" />
+    
+    <!-- Arrow Head -->
+    <path d="M 38 88 L 54 84 L 46 70 Z" fill="url(#asmCyan)" stroke="#FFFFFF" stroke-width="1.5" />
+
+    <!-- Sparkles / Clean Icons -->
+    <!-- Top Right Sparkle -->
+    <path d="M 92 18 L 94 24 L 100 26 L 94 28 L 92 34 L 90 28 L 84 26 L 90 24 Z" fill="#FFD166" />
+    <!-- Bottom Left Sparkle -->
+    <path d="M 18 78 L 19.5 82.5 L 24 84 L 19.5 85.5 L 18 90 L 16.5 85.5 L 12 84 L 16.5 82.5 Z" fill="#00E5FF" />
+    <!-- Accent Sparkle -->
+    <path d="M 82 72 L 83 75 L 86 76 L 83 77 L 82 80 L 81 77 L 78 76 L 81 75 Z" fill="#FFFFFF" />
+  </g>
+</svg>

@@ -209,6 +209,13 @@ def capture_screenshots(
         page.screenshot(path=str(path), full_page=False)
         written.append(path.resolve())
 
+        page.set_viewport_size(VIEWPORT)
+        page.locator("#generated-sql-code").scroll_into_view_if_needed()
+        _prepare_page_for_capture(page)
+        path = output_dir / "05-generated-sql.png"
+        page.screenshot(path=str(path), full_page=False)
+        written.append(path.resolve())
+
         context.close()
         browser.close()
 

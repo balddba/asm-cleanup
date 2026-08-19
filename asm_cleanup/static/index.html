@@ -9,6 +9,11 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+    <link rel="shortcut icon" href="/static/favicon.ico">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/static/favicon-16x16.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -16,7 +21,7 @@
     <section id="view-login" class="login-view hide">
         <div class="login-card">
             <div class="login-header">
-                <span class="icon-db">🗄️</span>
+                <img src="/static/logo-sm.png" alt="ASM Clean-Up Logo" class="brand-logo-icon">
                 <h1>ASM Clean-Up</h1>
             </div>
             <p class="login-subtitle">Enter the shared password to continue.</p>
@@ -35,7 +40,7 @@
         <!-- Sidebar: Targets Management -->
         <aside class="sidebar">
             <div class="sidebar-header">
-                <span class="icon-db">🗄️</span>
+                <img src="/static/logo-sm.png" alt="ASM Clean-Up Logo" class="brand-logo-icon">
                 <h1>ASM Clean-Up</h1>
             </div>
             
@@ -67,7 +72,7 @@
                 <div class="welcome-card card">
                     <span class="welcome-badge">SYSTEM STABLE</span>
                     <h2>Automate Oracle ASM Storage Mapping</h2>
-                    <p>Select an existing target connection from the sidebar or configure a new connection profile. The cleaner will automatically discover Grid Homes, databases, disk groups, PDB files, and map container GUIDs to build non-disruptive, review-ready OMF MOVE scripts.</p>
+                    <p>Select an existing target connection from the sidebar or configure a new connection profile. The cleaner will automatically discover Grid Homes, databases, disk groups, PDB files, and map container GUIDs to build review-ready OMF MOVE scripts.</p>
                     <div class="welcome-steps">
                         <div class="step-card">
                             <span class="step-num">1</span>
@@ -82,7 +87,7 @@
                         <div class="step-card">
                             <span class="step-num">3</span>
                             <h3>Migrate</h3>
-                            <p>Review the generated database-safe, zero-downtime MOVE statements.</p>
+                            <p>Review generated MOVE statements, with optional online moves.</p>
                         </div>
                     </div>
                 </div>

@@ -157,7 +157,7 @@ class MoveSqlEmitter:
                     )
                 last_container = label
 
-            kind = record.file_type
+            kind = record.file_type.value
             online_clause = f" {kw('ONLINE')}" if self.policy.online else ""
             stmt = (
                 f"{kw('ALTER DATABASE MOVE')} {kw(kind)} '{record.source_path}' "

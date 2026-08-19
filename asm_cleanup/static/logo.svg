@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 380 90" width="100%" height="100%">
+  <defs>
+    <!-- Vibrant Cyan Gradient -->
+    <linearGradient id="asmCyanText" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00E5FF" />
+      <stop offset="100%" stop-color="#0088FF" />
+    </linearGradient>
+
+    <linearGradient id="asmCyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00E5FF" />
+      <stop offset="100%" stop-color="#0088FF" />
+    </linearGradient>
+
+    <!-- Warm Amber Accent Gradient -->
+    <linearGradient id="asmAmber" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFB703" />
+      <stop offset="100%" stop-color="#FF8500" />
+    </linearGradient>
+
+    <!-- Metallic/Disks Top Cap Gradient -->
+    <linearGradient id="asmTop" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#E0F7FF" />
+      <stop offset="100%" stop-color="#00C6FF" />
+    </linearGradient>
+    
+    <!-- Subtle Drop Shadow for legibility on white and dark backgrounds -->
+    <filter id="logoShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#000000" flood-opacity="0.3" />
+    </filter>
+  </defs>
+
+  <g filter="url(#logoShadow)">
+    <!-- ICON GROUP (Scaled & Positioned at x=10, y=5) -->
+    <g transform="translate(10, 5) scale(0.65)">
+      <!-- Base Outer Outline for visibility on both dark & light backgrounds -->
+      <g stroke="#FFFFFF" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity="0.95">
+        <path d="M 35 32 C 35 24, 75 24, 75 32 L 75 78 C 75 86, 35 86, 35 78 Z" />
+        <path d="M 22 64 C 18 42, 42 22, 70 20 C 88 19, 98 28, 96 42 C 94 56, 75 72, 48 82 L 40 92 L 60 88" />
+      </g>
+
+      <!-- Disk 3 (Bottom) -->
+      <path d="M 36 62 L 36 76 C 36 84, 74 84, 74 76 L 74 62 Z" fill="url(#asmCyan)" />
+      <ellipse cx="55" cy="62" rx="19" ry="7" fill="#00A3E0" />
+
+      <!-- Disk 2 (Middle - Amber) -->
+      <path d="M 36 46 L 36 60 C 36 68, 74 68, 74 60 L 74 46 Z" fill="url(#asmAmber)" />
+      <ellipse cx="55" cy="46" rx="19" ry="7" fill="#E69500" />
+
+      <!-- Disk 1 (Top) -->
+      <path d="M 36 30 L 36 44 C 36 52, 74 52, 74 44 L 74 30 Z" fill="url(#asmCyan)" />
+      <ellipse cx="55" cy="30" rx="19" ry="7" fill="url(#asmTop)" />
+
+      <!-- Orbital Arrow -->
+      <path d="M 20 62 C 16 40, 42 18, 72 18 C 92 18, 102 28, 98 44 C 94 60, 72 76, 42 86" 
+            fill="none" stroke="url(#asmCyan)" stroke-width="7" stroke-linecap="round" />
+      <path d="M 38 88 L 54 84 L 46 70 Z" fill="url(#asmCyan)" stroke="#FFFFFF" stroke-width="1.5" />
+
+      <!-- Sparkles -->
+      <path d="M 92 18 L 94 24 L 100 26 L 94 28 L 92 34 L 90 28 L 84 26 L 90 24 Z" fill="#FFD166" />
+      <path d="M 18 78 L 19.5 82.5 L 24 84 L 19.5 85.5 L 18 90 L 16.5 85.5 L 12 84 L 16.5 82.5 Z" fill="#00E5FF" />
+      <path d="M 82 72 L 83 75 L 86 76 L 83 77 L 82 80 L 81 77 L 78 76 L 81 75 Z" fill="#FFFFFF" />
+    </g>
+
+    <!-- TYPOGRAPHY GROUP -->
+    <g transform="translate(95, 52)">
+      <!-- Contrast text outline for universal background legibility (light/dark) -->
+      <text x="0" y="0" 
+            font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" 
+            font-weight="800" font-size="34" letter-spacing="0.5" 
+            stroke="#0E1016" stroke-width="4" stroke-linejoin="round" fill="none" opacity="0.6">
+        ASM
+      </text>
+
+      <!-- Main "ASM" Cyan Gradient Text -->
+      <text x="0" y="0" 
+            font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" 
+            font-weight="800" font-size="34" letter-spacing="0.5" 
+            fill="url(#asmCyanText)">
+        ASM
+      </text>
+
+      <!-- Subtitle text background contrast outline -->
+      <text x="94" y="-2" 
+            font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" 
+            font-weight="600" font-size="18" letter-spacing="2.5" 
+            stroke="#0E1016" stroke-width="3" stroke-linejoin="round" fill="none" opacity="0.6">
+        CLEAN-UP
+      </text>
+
+      <!-- Subtitle "CLEAN-UP" Text -->
+      <text x="94" y="-2" 
+            font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" 
+            font-weight="600" font-size="18" letter-spacing="2.5" 
+            fill="#F3F4F6">
+        CLEAN-UP
+      </text>
+
+      <!-- Amber Accent Line below Subtitle -->
+      <rect x="94" y="8" width="168" height="3.5" rx="1.75" fill="url(#asmAmber)" />
+    </g>
+  </g>
+</svg>
