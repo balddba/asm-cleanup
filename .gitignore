@@ -1,1 +1,45 @@
+# Secrets and local env
+.env
+.env.*
+!.env.example
+
+# Local SQLite / keyring (keep committed demo DB)
+/asm_cleanup.db
+/asm_cleanup_demo.db
+*.db
+!docs/demo/asm_cleanup_demo.db
+ssh_keys.cryptfile.cfg
+*.cryptfile.cfg
+
+# Logs and walk artifacts
 logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+
+# Test / lint / type caches
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editors and OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Tooling (local-only)
+.cursor/
+.github/
+agent-transcripts/

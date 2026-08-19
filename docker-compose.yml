@@ -1,0 +1,47 @@
+services:
+  web:
+    build: .
+    image: asm-cleanup:local
+    ports:
+      - "${ASM_CLEANUP_PORT:-8000}:8000"
+    environment:
+      DATABASE_URL: sqlite:////data/asm_cleanup.db
+      ASM_CLEANUP_DEBUG: "${ASM_CLEANUP_DEBUG:-}"
+      ASM_CLEANUP_PASSWORD: "${ASM_CLEANUP_PASSWORD:?set ASM_CLEANUP_PASSWORD}"
+      ASM_CLEANUP_JWT_SECRET: "${ASM_CLEANUP_JWT_SECRET:?set ASM_CLEANUP_JWT_SECRET}"
+      ASM_CLEANUP_KEYRING_KEY: "${ASM_CLEANUP_KEYRING_KEY:?set ASM_CLEANUP_KEYRING_KEY}"
+      ASM_CLEANUP_KEYRING_FILE: /data/ssh_keys.cryptfile.cfg
+      ASM_CLEANUP_TIMEZONE: "${ASM_CLEANUP_TIMEZONE:-UTC}"
+    volumes:
+      # Persistent SQLite database
+      - asm-cleanup-data:/data
+      # Walk transcripts / generated SQL artifacts
+      - ./logs:/app/logs
+      # Optional: mount host SSH keys for Fabric (set key path to /ssh/<name> in the UI)
+      # - ${HOME}/.ssh:/ssh:ro
+    restart: unless-stopped
+
+  # Documentation screenshots only — uses committed fictional demo DB (baldba.com).
+  # Does not share a volume with `web`; real targets stay on asm-cleanup-data.
+  web-demo:
+    build: .
+    image: asm-cleanup:local
+    ports:
+      - "${ASM_CLEANUP_DEMO_PORT:-8001}:8000"
+    environment:
+      DATABASE_URL: sqlite:////data/asm_cleanup_demo.db
+      DEMO_DB_SOURCE: /demo/asm_cleanup_demo.db
+      ASM_CLEANUP_DEBUG: "${ASM_CLEANUP_DEBUG:-}"
+      ASM_CLEANUP_PASSWORD: "${ASM_CLEANUP_PASSWORD:?set ASM_CLEANUP_PASSWORD}"
+      ASM_CLEANUP_JWT_SECRET: "${ASM_CLEANUP_JWT_SECRET:?set ASM_CLEANUP_JWT_SECRET}"
+      ASM_CLEANUP_KEYRING_KEY: "${ASM_CLEANUP_KEYRING_KEY:?set ASM_CLEANUP_KEYRING_KEY}"
+      ASM_CLEANUP_KEYRING_FILE: /data/ssh_keys.cryptfile.cfg
+      ASM_CLEANUP_TIMEZONE: "${ASM_CLEANUP_TIMEZONE:-UTC}"
+    volumes:
+      - ./docs/demo/asm_cleanup_demo.db:/demo/asm_cleanup_demo.db:ro
+      - ./logs:/app/logs
+    entrypoint: ["/app/scripts/docker-demo-entrypoint.sh"]
+    restart: "no"
+
+volumes:
+  asm-cleanup-data:

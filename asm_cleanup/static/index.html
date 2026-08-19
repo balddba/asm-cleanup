@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Interactive Oracle ASM Alias Clean-up, Database Storage Configuration, and PDB-to-GUID Mapping dashboard.">
+    <title>ASM Clean-Up</title>
+    <!-- Modern Typography: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Login View (shown until authenticated) -->
+    <section id="view-login" class="login-view hide">
+        <div class="login-card">
+            <div class="login-header">
+                <span class="icon-db">🗄️</span>
+                <h1>ASM Clean-Up</h1>
+            </div>
+            <p class="login-subtitle">Enter the shared password to continue.</p>
+            <form id="login-form" class="login-form">
+                <div class="form-group">
+                    <label for="login-password">Password</label>
+                    <input type="password" id="login-password" required autocomplete="current-password" placeholder="Password">
+                </div>
+                <p id="login-error" class="login-error hide"></p>
+                <button type="submit" class="btn btn-primary w-full">Sign in</button>
+            </form>
+        </div>
+    </section>
+
+    <div id="app-container" class="app-container hide">
+        <!-- Sidebar: Targets Management -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <span class="icon-db">🗄️</span>
+                <h1>ASM Clean-Up</h1>
+            </div>
+            
+            <button id="btn-add-target" class="btn btn-primary w-full">+ Add Connection</button>
+            
+            <div class="target-section">
+                <h2>Saved Connections</h2>
+                <ul id="target-list" class="target-list">
+                    <!-- Targets loaded dynamically -->
+                </ul>
+            </div>
+
+            <div class="recent-scans-section">
+                <h2>Scan History</h2>
+                <ul id="scan-history-list" class="scan-history-list">
+                    <!-- Scan history loaded dynamically -->
+                </ul>
+            </div>
+
+            <div class="sidebar-footer">
+                <button id="btn-logout" class="btn btn-secondary w-full">Log out</button>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Welcome View (Default) -->
+            <section id="view-welcome" class="dashboard-view active">
+                <div class="welcome-card card">
+                    <span class="welcome-badge">SYSTEM STABLE</span>
+                    <h2>Automate Oracle ASM Storage Mapping</h2>
+                    <p>Select an existing target connection from the sidebar or configure a new connection profile. The cleaner will automatically discover Grid Homes, databases, disk groups, PDB files, and map container GUIDs to build non-disruptive, review-ready OMF MOVE scripts.</p>
+                    <div class="welcome-steps">
+                        <div class="step-card">
+                            <span class="step-num">1</span>
+                            <h3>Connect</h3>
+                            <p>Enter remote target connection properties securely over SSH.</p>
+                        </div>
+                        <div class="step-card">
+                            <span class="step-num">2</span>
+                            <h3>Scan</h3>
+                            <p>Automatically discover storage layout, databases, and aliases.</p>
+                        </div>
+                        <div class="step-card">
+                            <span class="step-num">3</span>
+                            <h3>Migrate</h3>
+                            <p>Review the generated database-safe, zero-downtime MOVE statements.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Target Form View (Create/Edit) -->
+            <section id="view-target-form" class="dashboard-view">
+                <div class="card form-card">
+                    <h2 id="form-title">Configure Connection</h2>
+                    <form id="target-config-form" class="target-form">
+                        <input type="hidden" id="form-target-id">
+                        
+                        <div class="form-group-row">
+                            <div class="form-group">
+                                <label for="form-name">Connection Name</label>
+                                <input type="text" id="form-name" required placeholder="e.g. Lab Database Server">
+                            </div>
+                            <div class="form-group">
+                                <label for="form-dest-dg">Destination Disk Group</label>
+                                <input type="text" id="form-dest-dg" required value="+DATA" placeholder="e.g. +DATA">
+                            </div>
+                        </div>
+
+                        <div class="form-group form-check">
+                            <label class="form-check-label" for="form-move-online">
+                                <input type="checkbox" id="form-move-online">
+                                <span>Move online</span>
+                            </label>
+                            <p class="form-hint">When checked, generated SQL uses <code>MOVE ... ONLINE</code> so files stay available during the move.</p>
+                        </div>
+
+                        <div class="form-group-row">
+                            <div class="form-group">
+                                <label for="form-host">SSH Hostname / IP</label>
+                                <input type="text" id="form-host" required placeholder="e.g. db-server.internal">
+                            </div>
+                            <div class="form-group">
+                                <label for="form-user">SSH Username</label>
+                                <input type="text" id="form-user" required value="oracle" placeholder="e.g. oracle">
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="form-ssh-key-path">SSH Key Path (Optional)</label>
+                            <input type="text" id="form-ssh-key-path" placeholder="e.g. ~/.ssh/id_ed25519 (defaults to search standard keys)">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="form-ssh-key-content">SSH Key Content (Optional Override)</label>
+                            <textarea id="form-ssh-key-content" rows="4" placeholder="Paste -----BEGIN OPENSSH PRIVATE KEY----- block here..."></textarea>
+                        </div>
+
+                        <div class="form-group-row">
+                            <div class="form-group">
+                                <label for="form-grid-home">Grid Home (Optional Override)</label>
+                                <input type="text" id="form-grid-home" placeholder="Discovered automatically if empty">
+                            </div>
+                            <div class="form-group">
+                                <label for="form-oracle-sid">ASM Instance SID (Optional Override)</label>
+                                <input type="text" id="form-oracle-sid" placeholder="Discovered automatically if empty">
+                            </div>
+                        </div>
+
+                        <div class="form-actions">
+                            <button type="button" id="btn-cancel-form" class="btn btn-secondary">Cancel</button>
+                            <button type="button" id="btn-delete-target" class="btn btn-danger hide">Delete</button>
+                            <button type="submit" class="btn btn-primary">Save Profile</button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
+            <!-- Active Scan / Scan Details View -->
+            <section id="view-scan-details" class="dashboard-view">
+                <div class="detail-header-row">
+                    <div>
+                        <h2 id="detail-target-name">Target Name</h2>
+                        <p class="meta-label">Discovered profile properties and storage analysis</p>
+                    </div>
+                    <div id="scan-status-badge" class="badge">PENDING</div>
+                </div>
+
+                <!-- Progress / Error Banner -->
+                <div id="scan-progress-banner" class="scan-banner hide">
+                    <div class="loader-spinner" aria-hidden="true"></div>
+                    <div class="scan-progress-body">
+                        <p id="scan-progress-label" class="scan-progress-label">Scan in progress</p>
+                        <p id="scan-progress-message" class="scan-progress-message">
+                            Executing target discovery and ASM walks over SSH...
+                        </p>
+                        <div class="scan-progress-track" aria-hidden="true">
+                            <div class="scan-progress-indeterminate"></div>
+                        </div>
+                    </div>
+                </div>
+                <div id="scan-error-banner" class="scan-banner error-banner hide">
+                    <span class="banner-icon">⚠️</span>
+                    <div>
+                        <h3>Scan Run Blocked</h3>
+                        <p id="scan-error-message"></p>
+                    </div>
+                </div>
+
+                <!-- Discovered Infrastructure Metadata Cards -->
+                <div class="metadata-grid">
+                    <div class="card meta-card">
+                        <h3>Grid Infrastructure</h3>
+                        <div class="meta-item">
+                            <span class="label">Grid Home:</span>
+                            <span id="meta-grid-home" class="val">--</span>
+                        </div>
+                        <div class="meta-item">
+                            <span class="label">ASM Disk Groups:</span>
+                            <span id="meta-disk-groups" class="val">--</span>
+                        </div>
+                    </div>
+                    
+                    <div class="card meta-card">
+                        <h3>Discovered Databases</h3>
+                        <div id="meta-databases-list" class="meta-dbs-list">
+                            <!-- Databases and storage paths loaded dynamically -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Alias Inventory Section -->
+                <div class="card table-card mt-6">
+                    <div class="table-header-row">
+                        <h3>ASM Alias Files Discovered</h3>
+                        <span id="alias-count-badge" class="count-badge">0 found</span>
+                    </div>
+                    <div class="table-container">
+                        <table id="alias-table">
+                            <thead>
+                                <tr>
+                                    <th>Database</th>
+                                    <th>Container (PDB/CDB)</th>
+                                    <th>Type</th>
+                                    <th>ASM Alias Path</th>
+                                    <th>OMF Target Destination</th>
+                                </tr>
+                            </thead>
+                            <tbody id="alias-table-body">
+                                <tr>
+                                    <td colspan="5" class="text-center">No aliases discovered on this target database.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Generated OMF MOVE SQL Section -->
+                <div class="card code-card mt-6">
+                    <div class="code-header-row">
+                        <h3>Generated OMF MOVE SQL</h3>
+                        <div class="code-header-actions">
+                            <button id="btn-download-sql" class="btn btn-secondary btn-sm" type="button">Download Script</button>
+                            <button id="btn-copy-sql" class="btn btn-secondary btn-sm" type="button">Copy Script</button>
+                        </div>
+                    </div>
+                    <div id="sql-db-tabs" class="sql-db-tabs hide" role="tablist" aria-label="Database SQL scripts"></div>
+                    <pre><code id="generated-sql-code" class="language-sql">-- SQL fix script will load here...</code></pre>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Database Details Modal -->
+    <dialog id="db-details-modal" closedby="any" aria-labelledby="modal-db-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modal-db-title">Database Details</h2>
+                <button id="btn-close-modal" class="btn-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="modal-meta-section">
+                    <h3>Configuration</h3>
+                    <div class="meta-item">
+                        <span class="label">Oracle SID:</span>
+                        <span id="modal-db-sid" class="val">--</span>
+                    </div>
+                    <div class="meta-item">
+                        <span class="label">Oracle Home:</span>
+                        <span id="modal-db-home" class="val">--</span>
+                    </div>
+                    <div class="meta-item">
+                        <span class="label">OMF Dest:</span>
+                        <span id="modal-db-dest" class="val">--</span>
+                    </div>
+                    <div class="meta-item">
+                        <span class="label">FRA Dest:</span>
+                        <span id="modal-db-recovery" class="val">--</span>
+                    </div>
+                </div>
+                
+                <div class="modal-pdbs-section mt-6">
+                    <h3>Discovered PDBs</h3>
+                    <ul id="modal-pdbs-list" class="modal-pdbs-list">
+                        <!-- PDBs loaded dynamically -->
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </dialog>
+
+    <!-- Notification Toast -->
+    <div id="toast" class="toast hide">Notification Message</div>
+
+    <!-- Client application JS -->
+    <script src="/static/app.js"></script>
+</body>
+</html>

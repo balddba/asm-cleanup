@@ -1,418 +1,299 @@
 # asm-cleanup
 
-Python helpers for Oracle ASM: run **`asmcmd`** locally or over **SSH** (Fabric), walk an ASM directory tree, parse **`asmcmd ls -l`** lines for DATAFILE/TEMPFILE aliases, emit draft **OMF move** SQL, and optionally check **`asmcmd lsof`** paths against allowed **disk group + database** prefixes from YAML.
+Walk Oracle ASM, inventory DATAFILE/TEMPFILE aliases, and emit review-only OMF **MOVE** SQL. The **primary interface is the web GUI**: connect over SSH, run discovery scans, review alias inventory, and download generated SQL — without writing YAML or calling the library API.
+
+Supports local `asmcmd` or SSH (Fabric) with Grid env wrapping. Does **not** connect via SQL\*Net or execute moves — generated SQL is a review artifact only.
+
+## Why this exists (Context)
+
+When converting non-container databases (non-CDB) to container databases (CDB), you can end up with a large number of aliased files in ASM. This becomes increasingly difficult to manage when the files are not stored in a single `+DATA/{DBNAME}` directory, but are instead spread across multiple directories due to legacy upgrades and database name changes.
+
+`asm-cleanup` was built to consolidate all these scattered datafiles into a single directory. It scans ASM disk groups, inventories the existing aliases, and generates the required Oracle Managed Files (OMF) `MOVE` SQL statements to relocate files cleanly into the target directory structure.
+
+![ASM Clean-Up dashboard](docs/images/02-dashboard.png)
 
 ## Requirements
 
-- **Python 3.13+**
-- **`asmcmd`** available on the target (local shell or remote Grid home)
-- For SSH: key or password in Fabric **`connect_kwargs`**, and a YAML top-level **`targets`** map
+- Python 3.13+
+- `asmcmd` on the target (PATH locally, or under Grid home remotely)
+- For SSH: Fabric `connect_kwargs` (e.g. `key_filename`); if omitted, `~/.ssh/id_ed25519` or `id_rsa` is discovered when present
+- Target connection profiles stored in SQLite (managed in the web UI)
 
-## Install
-
-**Shell** (clone or cd into the repo, then sync):
+## Quick start (web GUI)
 
 ```bash
 cd /path/to/asm-cleanup
-uv sync
+uv sync --extra web --group dev
+./scripts/setup_env.sh   # generates password, JWT secret, and keyring key
+uv run asm-cleanup web
 ```
 
-**Shell** (editable install so `asm-cleanup` is on your PATH):
+Open **http://127.0.0.1:8000**, sign in with the shared password, add a connection, and trigger a discovery scan from the UI.
+
+| Env var | Required | Purpose |
+|---------|----------|---------|
+| `ASM_CLEANUP_PASSWORD` | yes (web) | Shared login password (not a placeholder; min 8 characters) |
+| `ASM_CLEANUP_JWT_SECRET` | yes (web) | HS256 signing secret (≥32 bytes; not a `change-me` placeholder) |
+| `ASM_CLEANUP_KEYRING_KEY` | yes (web/run) | Passphrase for the SSH-key cryptfile (≥32 bytes) |
+| `ASM_CLEANUP_KEYRING_FILE` | no | Cryptfile path (default: next to the SQLite database) |
+| `ASM_CLEANUP_JWT_TTL_SECONDS` | no | Token lifetime (default `86400`) |
+| `ASM_CLEANUP_TIMEZONE` | no | Timezone for generated files and database records (default `UTC`, e.g., `America/Detroit`) |
+
+### Docker
 
 ```bash
-pip install -e .
+./scripts/setup_env.sh   # generates password, JWT secret, and keyring key
+docker compose up --build
 ```
 
-This exposes the **`asm-cleanup`** console script.
+The web service persists targets and scans in a SQLite volume at `/data/asm_cleanup.db`. Pasted SSH private keys are stored in an encrypted cryptfile (`/data/ssh_keys.cryptfile.cfg`) unlocked by `ASM_CLEANUP_KEYRING_KEY`, not in SQLite.
 
-### Debug output
-
-- **CLI:** pass **`--debug`** to print `[AsmCleanup:debug]` lines (SSH host resolution, `database_filter` vs YAML `databases`, remote shell script previews, `asmcmd` stderr, monitoring prefixes).
-- **Library:** `AsmCleanup(..., debug=True)`, or `AsmCleanup.ssh(..., debug=True)`, or `AsmCleanup.run_asm_walk(..., debug=True)`.
-- **Environment:** set **`ASM_CLEANUP_DEBUG=1`** (or `true` / `yes` / `on`) to enable the same traces without code changes.
-
----
-
-## Configuration (`config.yaml`)
-
-Use a top-level **`targets`** map in `config.yaml`. Each **key** (`lab`, `prod`, …) is a **target id** (CLI **`--host`** names which entry to use). Values are SSH + Grid settings plus **`databases`** and **`disk_groups`** used by **`monitor_file_access`**.
-
-**YAML** (example fragment; save as e.g. `config.yaml`):
-
-```yaml
-targets:
-  lab:
-    host: "grid-lab.example.com"
-    user: "oracle"
-    grid_home: "/u01/app/19c/grid"
-    # Typical fix for ASMCMD-8102 over SSH — see README section below.
-    oracle_sid: "+ASM"
-    use_oraenv: true
-    oraenv_path: "/usr/local/bin/oraenv"
-    monitor_interval: 5
-    monitor_count: 5
-    connect_kwargs:
-      key_filename: "/home/you/.ssh/id_ed25519"
-    disk_groups:
-      - "+DATA"
-      - "+FRA"
-    databases:
-      - MYDB
-      - OTHERDB
-    # Optional: if set, ``ac.run()`` / CLI with no asm_path walks ONLY this path instead of
-    # every disk_groups × databases combination.
-    # default_asm_path: "+DATA/MYDB"
-    # Optional: map each PDB’s 32-hex ASM directory GUID to its PDB name so generated move SQL
-    # can emit ``ALTER SESSION SET CONTAINER`` when switching between PDBs (see below).
-    # pdb_guid_map:
-    #   "49C96937E332EB45E0631A04010ABA14": "TOOLKITPDB"
-  prod:
-    host: "grid-prod.example.com"
-    user: "grid"
-    grid_home: "/u01/app/grid"
-    connect_kwargs:
-      key_filename: "/home/you/.ssh/id_ed25519"
-    disk_groups:
-      - "+DATA"
-    databases:
-      - PRODDB
-```
-
-**Python script** (load target config from disk):
-
-```python
-from asm_cleanup import load_targets
-
-targets = load_targets("config.yaml")
-lab = targets["lab"]
-print(lab.host, lab.grid_home, lab.databases)
-```
-
-### Default: all configured ASM paths (`disk_groups` × `databases`)
-
-With **SSH** and **no** `asm_path`, **`ac.run()`** / **`asm-cleanup`** walks **every** combination (e.g. `+DATA/homelab` and `+FRA/homelab`), one walk per path, with per-path output files. **`--database`** / **`database_filter`** limits which database names are included in that product.
-
-If YAML sets **`default_asm_path`**, omitting `asm_path` walks **only that one** directory instead (override when you do not want the full grid).
-
-You can also call **`ac.run_all_configured_paths()`** directly if you prefer not to use **`ac.run()`**.
-
-### ASM walk path (explicit `asm_path`)
-
-Pass **`asm_path`** (CLI positional or **`ac.run("+DATA/…")`**) when you want **one** subtree. **`resolve_asm_walk_path()`** is still available for programmatic use (e.g. infer one path when you have a single DB and no `default_asm_path`).
-
-**Local** mode always requires an explicit **`asm_path`** (no YAML host profile).
-
-### PDB paths and `ALTER SESSION SET CONTAINER`
-
-On multitenant databases, ASM often stores PDB files under **`+DISKGROUP/DB_UNIQUE_NAME/<32-hex-GUID>/DATAFILE|TEMPFILE/`**. The walk transcript is used to detect that GUID (from the alias **source** path, or from the **target** OMF path when the source is a short alias). Files under **`.../DB_UNIQUE_NAME/DATAFILE/`** with **no** GUID directory are treated as **CDB$ROOT**.
-
-`asmcmd` does **not** print the human-readable PDB name, so the tool cannot emit a correct **`ALTER SESSION SET CONTAINER`** until you add optional **`pdb_guid_map`** on the host in YAML: keys are the 32-character GUID (any case), values are the PDB name as Oracle expects it in **`SET CONTAINER`**. When the map is present, generated move SQL inserts **`ALTER SESSION SET CONTAINER = …`** whenever the resolved PDB changes between consecutive statements (including back to **`CDB$ROOT`**). Unmapped GUIDs produce SQL comments instead of a session switch.
-
-### ASMCMD-8102 (“no connection to Oracle ASM”) over SSH
-
-Non-interactive SSH usually does **not** match an interactive login: **`ORACLE_HOME`** may point at the wrong tree, **`ORACLE_BASE`** and **`LD_LIBRARY_PATH`** are unset, and **`PATH`** may omit **`$ORACLE_HOME/bin`**. `asmcmd` can then print **“Connected to an idle instance”** and **ASMCMD-8102** even though ASM is healthy.
-
-**Recommended (matches `ORAENV_ASK=NO` + `. oraenv` on the server):**
-
-**YAML** (merge under a host entry in `config.yaml`):
-
-```yaml
-oracle_sid: "+ASM"       # same value you would type for oraenv (often +ASM or +ASM1)
-use_oraenv: true
-oraenv_path: "/usr/local/bin/oraenv"   # run `which oraenv` on the host if unsure
-```
-
-That runs, before each remote `asmcmd` line:
-
-**Shell (what runs on the remote host; illustration only):**
+For documentation screenshots, use the separate `web-demo` service on port **8001**. It loads the committed fictional database at [`docs/demo/asm_cleanup_demo.db`](docs/demo/asm_cleanup_demo.db) and never shares a volume with `web`.
 
 ```bash
-export ORACLE_SID=…
-export ORAENV_ASK=NO
-. /usr/local/bin/oraenv
+docker compose up --build web-demo
+# open http://127.0.0.1:8001
 ```
 
-…so **`ORACLE_HOME`**, **`ORACLE_BASE`**, and library paths come from **`/etc/oratab`**, like your manual session.
+### Documentation screenshots
 
-**Simpler fallback** (no `oraenv` on the host): set only **`oracle_sid`**. Then the tool exports **`ORACLE_HOME`** from **`oracle_home`** if set, otherwise from **`grid_home`**, plus optional **`oracle_base`**, **`PATH`**, and **`LD_LIBRARY_PATH=$ORACLE_HOME/lib:…`**. Use this only when **`grid_home`** really is the GI **`ORACLE_HOME`** for that SID.
+Regenerate the README PNGs (1920×1080) against `web-demo`:
 
-**Full control:** set **`asm_env_init`** only; then **`use_oraenv`** / **`oracle_sid`** shortcuts are **not** applied. Example:
+```bash
+./scripts/generate_screenshots.sh
+```
 
-**YAML** (host entry fragment):
+That script syncs deps, installs Playwright Chromium, starts `web-demo`, captures the five images into `docs/images/`, then stops `web-demo`. It reads `ASM_CLEANUP_PASSWORD` from `.env` (same file Docker Compose uses) and never touches the real `web` / `asm_cleanup.db` volume.
 
-```yaml
-asm_env_init: |
-  export ORACLE_SID=+ASM
-  export ORAENV_ASK=NO
-  . /usr/local/bin/oraenv
+Manual equivalent:
+
+```bash
+docker compose up --build web-demo
+uv sync --extra web --group docs
+uv run --group docs playwright install chromium
+uv run --group docs python scripts/capture_docs_screenshots.py --base-url http://127.0.0.1:8001
+```
+
+After schema migrations, rebuild the committed demo DB (does not touch your real `asm_cleanup.db`):
+
+```bash
+uv run --extra web asm-cleanup db build-demo
+# or: uv run --extra web python scripts/build_demo_db.py
 ```
 
 ---
 
-## Examples
+## Using the web GUI
 
-Operational examples all use the same layout: a **`###` subheading** under this section as the example title (large type and outline entry on GitHub), then three labeled slots in order:
+### 1. Sign in
 
-1. **Python script** — run with `python your_script.py` (or paste into a `*.py` file).
-2. **CLI (no config file)** — local `asmcmd`; no `--ssh` and no `targets` YAML.
-3. **CLI (with config file)** — `--ssh` plus a well-formed `config.yaml` and **`--host`**.
+The dashboard uses a single shared password (no usernames). Sign in at the login screen, then manage connections and scans from the sidebar.
 
-If a slot is not supported for that title, the label is still shown and the body is a short **note** instead of a command.
+![Login](docs/images/01-login.png)
 
-Use `python` instead of `uv run python` if you are not using `uv`.
+### 2. Add a connection
 
-### Walking one ASM subtree
+Click **+ Add Connection** and enter SSH details for the Grid/Oracle host. Grid home and ASM SID are optional — discovery fills them in when omitted. Destination disk group defaults to `+DATA` and drives MOVE SQL targets.
 
-**Python script:**
+![Configure connection](docs/images/03-add-connection.png)
 
-```python
-#!/usr/bin/env python3
-from asm_cleanup import AsmCleanup
+| Field | Required | Notes |
+|-------|----------|-------|
+| Connection Name | yes | Unique profile name (also used by CLI `run`) |
+| Destination Disk Group | yes | Target disk group for MOVE commands (default `+DATA`) |
+| SSH Hostname / IP | yes | Remote host |
+| SSH Username | yes | Typically `oracle` or `grid` |
+| SSH Key Path / Content | no | Path on the app host, or a pasted private key stored in the encrypted cryptfile (`ASM_CLEANUP_KEYRING_KEY`); standard keys auto-discovered when omitted |
+| Grid Home / ASM SID | no | Overrides; auto-discovered when empty |
 
-with AsmCleanup.local() as ac:
-    ac.run("+DATA/MYDB")
-```
+### 3. Run a discovery scan
 
-**CLI (no config file):**
+Select a saved connection and click **Trigger Discovery Scan**. The runner discovers disk groups, databases, PDB GUID maps, and walk scope over SSH, then walks ASM aliases and emits review SQL. Progress and history appear in the sidebar.
 
-```bash
-asm-cleanup +DATA/MYDB
-```
+### 4. Review results and SQL
 
-**CLI (with config file):**
+Completed scans show Grid metadata, discovered databases, the alias inventory table, and generated OMF MOVE SQL. Use **Download Script** or **Copy Script** to take the SQL offline for review — nothing is executed against the database.
 
-```bash
-asm-cleanup +DATA/MYDB --ssh --config config.yaml --host lab
-```
+![Scan results](docs/images/04-scan-results.png)
 
-### Walking every disk group × database path
-
-**Python script:**
-
-```python
-#!/usr/bin/env python3
-from asm_cleanup import AsmCleanup
-
-with AsmCleanup.ssh("config.yaml", "lab") as ac:
-    ac.run()
-```
-
-**CLI (no config file):**
-
-```text
-Not supported: expanding every disk_groups × databases pair requires a `targets` map in YAML. Use local single-path mode in the previous example, or the SSH command below.
-```
-
-**CLI (with config file):**
-
-```bash
-asm-cleanup --ssh --config config.yaml --host lab
-```
-
-### Walking with a database filter
-
-Names in **`--database`** / `database_filter` must exist in that host’s **`databases`** list in YAML.
-
-**Python script:**
-
-```python
-#!/usr/bin/env python3
-from asm_cleanup import AsmCleanup
-
-with AsmCleanup.ssh("config.yaml", "lab", databases=["MYDB"]) as ac:
-    ac.run()
-```
-
-**CLI (no config file):**
-
-```text
-Not supported: --database is only valid with --ssh. Local CLI has no YAML databases list to filter.
-```
-
-**CLI (with config file):**
-
-```bash
-asm-cleanup --ssh --config config.yaml --host lab --database MYDB
-```
-
-### Walking without emitting fix SQL
-
-**Python script:**
-
-```python
-#!/usr/bin/env python3
-from asm_cleanup import AsmCleanup
-
-with AsmCleanup.local() as ac:
-    ac.run("+DATA/MYDB", no_fix=True)
-```
-
-**CLI (no config file):**
-
-```bash
-asm-cleanup +DATA/MYDB --no-fix
-```
-
-**CLI (with config file):**
-
-```bash
-asm-cleanup +DATA/MYDB --ssh --config config.yaml --host lab --no-fix
-```
-
-### Walking with debug logging
-
-**Python script:**
-
-```python
-#!/usr/bin/env python3
-from asm_cleanup import AsmCleanup
-
-with AsmCleanup.local(debug=True) as ac:
-    ac.run("+DATA/MYDB")
-```
-
-**CLI (no config file):**
-
-```bash
-asm-cleanup +DATA/MYDB --debug
-```
-
-**CLI (with config file):**
-
-```bash
-asm-cleanup +DATA/MYDB --ssh --config config.yaml --host lab --debug
-```
-
-### Writing walk and fix output to custom paths
-
-**Python script:**
-
-```python
-#!/usr/bin/env python3
-from pathlib import Path
-
-from asm_cleanup import AsmCleanup
-
-with AsmCleanup.ssh("config.yaml", "lab") as ac:
-    ac.run(
-        "+DATA/MYDB",
-        outfile=Path("artifacts/walk.txt"),
-        fixfile=Path("artifacts/fix.sql"),
-    )
-```
-
-**CLI (no config file):**
-
-```text
-Not supported: the CLI does not accept custom outfile/fixfile paths. Omitting them writes under logs/ with the default naming (see “Default output files” below).
-```
-
-**CLI (with config file):**
-
-```bash
-# SSH still uses default logs/ names; custom paths require the Python block above.
-asm-cleanup +DATA/MYDB --ssh --config config.yaml --host lab
-```
-
-### Checking open files against allowed ASM prefixes
-
-Uses **`monitor_file_access`** (library API; no CLI wrapper).
-
-**Python script:**
-
-```python
-#!/usr/bin/env python3
-from fabric import Connection
-from asm_cleanup import AsmCleanup, load_targets
-
-targets = load_targets("config.yaml")
-target = targets["lab"]
-ac = AsmCleanup(target, database_filter=["MYDB"])
-
-with Connection(
-    host=target.host,
-    user=target.user,
-    connect_kwargs=target.connect_kwargs,
-) as conn:
-    ac.monitor_file_access(conn)
-```
-
-**CLI (no config file):**
-
-```text
-Not supported: there is no asm-cleanup subcommand for monitor_file_access; use the Python block above.
-```
-
-**CLI (with config file):**
-
-```text
-Not supported on the CLI — monitoring needs a Fabric Connection plus YAML (Python block above).
-```
-
-### Parsing a saved walk transcript
-
-No **`asmcmd`** — works from an existing **`logs/asm_walk_*.txt`** file.
-
-**Python script:**
-
-```python
-#!/usr/bin/env python3
-from pathlib import Path
-
-from asm_cleanup import AsmCleanup
-
-path = AsmCleanup.normalize_asm_path("+data/mydb/system01.dbf")
-print(path)
-assert AsmCleanup.asm_path_prefix_match("+DATA/MYDB/x", "+data/mydb")
-
-lines = Path("logs/asm_walk_20260101_DATA_mydb.txt").read_text().splitlines()
-aliases = AsmCleanup.extract_aliases(lines)
-sql = AsmCleanup.generate_fix_script(aliases)
-```
-
-**CLI (no config file):**
-
-```text
-Not supported: parsing is library-only. Run a walk first (see “walking one asm subtree”), then use the Python block to read logs/asm_walk_*.txt.
-```
-
-**CLI (with config file):**
-
-```text
-Same as local — use Python to parse an existing transcript file.
-```
-
-**CLI reference (built-in help):**
-
-```bash
-asm-cleanup --help
-```
+![Generated OMF MOVE SQL](docs/images/05-generated-sql.png)
 
 ---
 
-## Default output files
+## CLI and library (secondary)
 
-Walk transcripts and generated SQL use **`logs/`** in the process working directory. That folder is created automatically when a walk runs. File names use a date stamp, a short slug from the ASM root (for example `+DATA/MYDB` → `DATA_MYDB`), and in multi-walk mode a two-digit sequence (`00`, `01`, …).
+CLI and Python APIs are available for automation and scripting. Day-to-day use should go through the web GUI above.
 
-| File | Meaning |
-|------|--------|
-| `logs/asm_walk_YYYYMMDD_DATA_MYDB.txt` | Single walk (explicit `asm_path` or YAML `default_asm_path`) |
-| `logs/asm_omf_fix_YYYYMMDD_DATA_MYDB.sql` | OMF SQL for that walk |
-| `logs/asm_walk_YYYYMMDD_NN_DATA_MYDB.txt` | One file per path when walking every configured `disk_groups` × `databases` pair (see **`AsmCleanup.output_paths_for_asm_path`**) |
-| `logs/asm_omf_fix_YYYYMMDD_NN_DATA_MYDB.sql` | SQL for that path |
+### Subcommands
+
+| Command | Purpose |
+|---------|---------|
+| `web` | Start the FastAPI web dashboard (primary) |
+| `run TARGET` | Run a synchronous discovery scan on a saved target |
+| `db upgrade` | Run Alembic database migrations |
+| `db build-demo` | Rebuild `docs/demo/asm_cleanup_demo.db` (docs only) |
+
+```bash
+uv run asm-cleanup --help
+uv run asm-cleanup run my-target-name
+```
+
+`POST /api/auth/login` with `{ "password": "..." }` returns a bearer token; other `/api/*` routes require `Authorization: Bearer <token>`. Library / `run` / `db` CLI paths are not JWT-gated.
+
+### Optional web dependencies
+
+Core library install is fabric + loguru + pydantic. Web UI, REST API, SQLite persistence, and CLI `web` / `run` / `db` need:
+
+```bash
+uv sync --extra web
+```
+
+### Library API
+
+When using the library pipeline directly, pass `ScopeConfig`, `MovePolicy`, and `ConnectionConfig`:
+
+```python
+from asm_cleanup import (
+    AsmSession,
+    ConnectionConfig,
+    ConnectionMode,
+    MovePolicy,
+    ScopeConfig,
+)
+
+connection = ConnectionConfig(
+    mode=ConnectionMode.ssh,
+    host="grid-lab.example.com",
+    user="oracle",
+    grid_home="/u01/app/19c/grid",
+    oracle_sid="+ASM",
+    connect_kwargs={"key_filename": "/home/you/.ssh/id_ed25519"},
+)
+scope = ScopeConfig(
+    disk_groups=["+DATA", "+FRA"],
+    databases=["MYDB"],
+)
+move_policy = MovePolicy(destination_disk_group="+DATA")
+
+with AsmSession.open(connection, scope=scope, move_policy=move_policy) as session:
+    results = session.run()  # expands scope.disk_groups × scope.databases
+```
+
+Omit `asm_path` to expand `scope.disk_groups × scope.databases` (or only `scope.default_asm_path` when set). Pass an explicit path for a single subtree.
+
+```python
+from asm_cleanup import AsmSession, ConnectionConfig, MovePolicy, ScopeConfig
+
+with AsmSession.open(connection, scope=scope, move_policy=move_policy) as session:
+    inventory = session.walk("+DATA/MYDB")
+    aliases = inventory.extract_aliases()
+    sql = session.emit_sql(inventory)
+    results = session.run()  # full pipeline; writes transcript / .sql / .json
+```
+
+Start from [`config.example.yaml`](config.example.yaml) for library-only config shapes. CLI/web targets live in SQLite (not YAML).
+
+### PDB GUID map and SQL emit
+
+Multitenant ASM paths often use `+DG/DB/<32-hex-GUID>/DATAFILE|TEMPFILE/`.
+
+**Web/CLI discovery scans:** collect GUID maps during host discovery, inject `PDB_GUID_<prefix>` placeholders for any remaining unmapped GUIDs, and emit with `fail_on_unmapped=False` so a scan can still produce review SQL.
+
+**Library API:** set `move_policy.auto_pdb_guid_map: true` (default) to fetch via srvctl + sqlplus before emit, or provide a manual `pdb_guid_map`. **Unmapped GUIDs fail emit** (`UnmappedPdbGuidError`) — inventory still succeeds.
+
+### ASMCMD-8102 over SSH
+
+Non-interactive SSH often needs Grid env setup. Set on `ConnectionConfig`:
+
+```python
+ConnectionConfig(
+    mode=ConnectionMode.ssh,
+    host="grid.example.com",
+    user="oracle",
+    grid_home="/u01/app/grid",
+    oracle_sid="+ASM",
+    use_oraenv=True,
+    oraenv_path="/usr/local/bin/oraenv",
+)
+```
+
+Or set `oracle_sid` alone (simple `ORACLE_HOME`/`PATH` exports), or a full custom `asm_env_init` preamble. Failed `asmcmd` calls raise `AsmCmdError` (including ASMCMD-8102 hints) instead of returning empty listings.
+
+### Debug
+
+- Env: `ASM_CLEANUP_DEBUG=1` (or `true` / `yes` / `on`)
+- Library: `AsmSession.open(connection, scope=..., move_policy=..., debug=True)`
+
+Uses **loguru** (no library `print` paths aside from the CLI human report).
+
+---
+
+## Example outputs
+
+Artifacts land under `logs/` by default (library pipeline). Web scans also persist inventory and SQL on the scan record for download from the UI.
+
+| Artifact | Pattern | Contents |
+|----------|---------|----------|
+| Walk transcript | `asm_walk_YYYYMMDD_….txt` | Versioned listing (`# asm-cleanup-transcript:1`) |
+| OMF MOVE SQL | `asm_omf_fix_YYYYMMDD_….sql` | Draft `ALTER DATABASE MOVE …` statements |
+| Result JSON | `asm_result_YYYYMMDD_….json` | Machine-readable `WalkResult` |
+
+Multi-path walks add a sequence segment (`_00_`, `_01_`, …) to the filename slug.
+
+### Generated MOVE SQL (CDB$ROOT)
+
+```sql
+-- =========================================================
+-- FIX DATAFILE
+-- Source: +DATA/MYDB/DATAFILE/system.dbf
+-- Target: +DATA/MYDB/DATAFILE/SYSTEM.255.1
+-- =========================================================
+ALTER DATABASE MOVE DATAFILE '+DATA/MYDB/DATAFILE/system.dbf' TO '+DATA';
+```
+
+For PDB-scoped aliases (GUID directory in the path), the emitter inserts container switches when the GUID is mapped:
+
+```sql
+-- Switch to container TOOLKITPDB so following MOVE statements run in that PDB (or CDB$ROOT).
+ALTER SESSION SET CONTAINER = TOOLKITPDB;
+
+-- =========================================================
+-- FIX DATAFILE
+-- Source: +DATA/MYDB/49C96937E332EB45E0631A04010ABA14/DATAFILE/a.dbf
+-- Target: +DATA/OMF
+-- =========================================================
+ALTER DATABASE MOVE DATAFILE '+DATA/MYDB/49C96937E332EB45E0631A04010ABA14/DATAFILE/a.dbf' TO '+DATA';
+```
 
 ---
 
 ## Package layout
 
-| Module | Contents |
-|------|----------|
-| `asm_cleanup.asm_cleanup` | `AsmCleanup`, `DEFAULT_LOG_DIR` — walk / analyze / fix, command runners, monitoring |
-| `asm_cleanup.target_config` | `TargetConfig`, `load_targets()` |
-| `asm_cleanup.cli` | `asm-cleanup` entrypoint |
+```
+asm_cleanup/
+  cli.py
+  web/          # FastAPI app, routers, auth deps
+  static/       # Web UI assets
+  config/       # ConnectionConfig, ScopeConfig, MovePolicy
+  transport/    # AsmCmdPort, LocalShellAdapter, SshGridAdapter
+  walk/         # AsmWalker, AsmInventory, transcript I/O
+  domain/       # AliasRecord, path helpers
+  sql/          # MoveSqlEmitter (fail-fast unmapped GUIDs)
+  pipeline/     # AsmSession, PipelineOrchestrator, WalkScopeResolver
+  services/     # ConnectionFactory, ScanService, AliasEnricher, TargetMapper
+  report/       # human + JSON reporters
+  discovery/    # HostDiscovery, TargetDiscoveryRunner facade
+  db/           # SQLite models + Alembic helpers
+```
 
----
+CLI/web scans (`TargetDiscoveryRunner` → `ScanService`) discover Grid/DB facts over SSH, then reuse
+`PipelineOrchestrator` / `AsmWalker` for walk + SQL. Dictionary remapping and non-OMF
+file enrichment stay in `AliasEnricher` before persistence.
 
-## Disclaimer
+## Testing
 
-Generated SQL is a **starting point** only. Review and test on non-production systems. This project does not open an Oracle SQL*Net session; it shells out to **`asmcmd`** and parses text.
+```bash
+uv run pytest
+```
+
+Unit tests use `FakeAsmCmdPort` and inline transcript fixtures. No live SSH/asmcmd in CI.
